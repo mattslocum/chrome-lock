@@ -478,6 +478,47 @@ Requires a packed `.crx` and a hosted `update.xml`. That is the project's only n
 dependency, and it is install-time infrastructure, not runtime. Development uses
 unpacked loading, which is per-profile.
 
+### Building the package
+
+`npm run keygen` / `npm run pack` / `npm run plist`, over `scripts/lib/{zip,crx,release}.js`.
+Chrome's own `--pack-extension` would produce the crx, but it needs a Chrome binary on
+the build machine and offers no way to inspect what went in. The formats are small — a
+zip, and a CRX3 header that is a short protobuf — so they are written out here instead,
+and `test/packaging.test.js` verifies the signature over the exact bytes Chrome checks
+with a protobuf reader written separately from the writer. No dependencies, consistent
+with everything else.
+
+Two properties are deliberate:
+
+- **The build is reproducible.** Entries are sorted and timestamps fixed, so the same
+  sources and key give the same bytes. That is what makes §10.8 — tag it, keep the CRX,
+  never auto-update from anything I don't control — checkable rather than a matter of
+  trust: a crx in the wild can be re-derived and compared.
+- **The packed file list is explicit**, in `scripts/lib/release.js`, not a directory
+  walk. A walk ships whatever is lying in `src/`; adding a file to a force-installed
+  extension should be a visible line in a diff. A test fails if the list and `src/` ever
+  disagree, so the explicitness cannot rot.
+
+The signing key is the extension's **identity**: Chrome derives the id from its public
+half and the policy names that id. A regenerated key is a different extension — new id,
+empty storage everywhere, and any locked profile stranded with a snapshot nothing
+installed can open. `keygen` refuses to overwrite an existing key for that reason.
+
+The invariants in §10 are also swept over the packaged sources by that test, on the
+files about to be frozen: no `innerHTML`, no `console.*`, no `chrome.storage.sync`, no
+`fetch`/`WebSocket`/inline script, and the CSP and permission list pinned.
+
+### The policy file
+
+`npm run plist -- --escrow escrow.json` writes both halves: the
+`ExtensionInstallForcelist` entry, and the escrow bundle under
+`3rdparty` → `extensions` → `<id>` → `escrowBundle`. On macOS the test runs the real
+`plutil` and asserts the bundle survives Apple's parser byte for byte — that the XML is
+well-formed was never the risk; delivering nested base64 intact is what decides whether
+parent unlock works on a child profile. `INSTALL.md` has the procedure and the
+verification checklist, which is manual by necessity: force-install, profile switching
+and restart survival are claims about a real browser, and no test can drive them.
+
 ## 10. Invariants
 
 1. Every message is validated as coming from us — `sender.id === chrome.runtime.id`,

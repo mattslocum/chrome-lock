@@ -6,7 +6,10 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "bench": "node scripts/bench.js"
+    "bench": "node scripts/bench.js",
+    "keygen": "node scripts/keygen.js",
+    "pack": "node scripts/pack.js",
+    "plist": "node scripts/plist.js"
   },
   "engines": {
     "node": ">=20"

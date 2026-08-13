@@ -1,0 +1,10 @@
+{
+  "_comment": [
+    "Release settings for scripts/pack.js and scripts/plist.js. See INSTALL.md.",
+    "signingKey fixes the extension id and is gitignored — back it up, never regenerate it.",
+    "updateBaseUrl is where dist/ is served from, e.g. a GitHub Pages site. Leave it null",
+    "and `npm run pack` still produces an installable crx; only auto-update needs it."
+  ],
+  "signingKey": "keys/chrome-lock.pem",
+  "updateBaseUrl": null
+}

@@ -15,3 +15,13 @@ dist/
 *.crx
 *.pem
 .DS_Store
+
+# The signing key *is* the extension id: lose it and the force-install policy
+# points at nothing; leak it and someone else can sign an update Chrome accepts.
+# It belongs in the password manager next to the master password, not in git.
+keys/
+
+# An exported escrow bundle holds no plaintext secret — its private half is
+# sealed under the master password — but there is no reason to publish one.
+escrow*.json
+
