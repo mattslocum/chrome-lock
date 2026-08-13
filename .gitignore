@@ -1,0 +1,17 @@
+# Third-party extensions kept locally for reference only.
+# These are Chrome Web Store downloads (someone else's copyrighted code,
+# and in ChromeLock's case ~9 MB of deliberate obfuscation). Not ours to commit.
+examples/*
+
+# ...but keep our own analysis of them.
+!examples/*/
+examples/*/*
+!examples/*/architecture.md
+!examples/comparison.md
+
+node_modules/
+dist/
+*.zip
+*.crx
+*.pem
+.DS_Store
