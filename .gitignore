@@ -16,6 +16,12 @@ dist/
 *.pem
 .DS_Store
 
+# ...except the published one. docs/ is what GitHub Pages serves, so the crx
+# there is the artifact Chrome actually downloads: it has to be committed, and
+# having it in the history is the point — that is what "tag it, keep the CRX"
+# (architecture.md §10.8) means in practice.
+!docs/*.crx
+
 # The signing key *is* the extension id: lose it and the force-install policy
 # points at nothing; leak it and someone else can sign an update Chrome accepts.
 # It belongs in the password manager next to the master password, not in git.

@@ -58,34 +58,50 @@ function main() {
   const crx = buildCrx(privateKeyPem);
   const crxName = `chrome-lock-${manifest.version}.crx`;
 
-  mkdirSync(DIST, { recursive: true });
-  writeFileSync(join(DIST, crxName), crx);
-
   const lines = [
     `Extension id: ${appId}`,
     `Version:      ${manifest.version}`,
     `Files:        ${PACKAGED_FILES.length}`,
     `SHA-256:      ${createHash('sha256').update(crx).digest('hex')}`,
-    `Wrote ${relative(ROOT, join(DIST, crxName))} (${crx.length} bytes)`,
   ];
+
+  // Both files or neither, into every destination. A crx published without the
+  // update.xml naming its version is an update Chrome will never look at, and
+  // an update.xml pointing at a crx that isn't there is a download that 404s on
+  // every profile at once — so they are never written separately.
+  const artifacts = [{ name: crxName, data: crx }];
 
   if (config.updateBaseUrl) {
     const base = config.updateBaseUrl.replace(/\/+$/, '');
-    const xml = buildUpdateXml({
-      appId,
-      version: manifest.version,
-      codebase: `${base}/${crxName}`,
+    artifacts.push({
+      name: 'update.xml',
+      data: buildUpdateXml({ appId, version: manifest.version, codebase: `${base}/${crxName}` }),
     });
-    writeFileSync(join(DIST, 'update.xml'), xml);
-    lines.push(`Wrote ${relative(ROOT, join(DIST, 'update.xml'))} → ${base}/${crxName}`);
+    lines.push(`Serving from: ${base}/${crxName}`);
   } else {
     // Not an error: a force-installed extension takes its update URL from the
     // policy, so the crx alone is enough to install and to test. Auto-update is
     // the part that needs somewhere to host.
     lines.push(
       'No updateBaseUrl in release.config.json, so no update.xml was written.',
-      'Set it to where dist/ will be served from to enable auto-update.',
+      'Without one there is no forcelist entry, and the extension stays disableable.',
     );
+  }
+
+  // dist/ is the build output and is gitignored; publishDir is committed and is
+  // what the update URL actually serves.
+  const destinations = [DIST, ...(config.publishDir ? [join(ROOT, config.publishDir)] : [])];
+
+  for (const destination of destinations) {
+    mkdirSync(destination, { recursive: true });
+    for (const artifact of artifacts) {
+      writeFileSync(join(destination, artifact.name), artifact.data);
+      lines.push(`Wrote ${relative(ROOT, join(destination, artifact.name))}`);
+    }
+  }
+
+  if (config.publishDir) {
+    lines.push(`Commit ${config.publishDir}/ and push to publish.`);
   }
 
   process.stdout.write(`${lines.join('\n')}\n`);

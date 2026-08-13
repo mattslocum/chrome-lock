@@ -24,7 +24,7 @@ import { makeZip } from '../scripts/lib/zip.js';
 import { makeCrx, parseCrx, extensionIdForKey, publicKeyDer, crxId } from '../scripts/lib/crx.js';
 import { buildCrx, buildUpdateXml } from '../scripts/pack.js';
 import { buildPlist, buildPolicies, checkEscrowBundle } from '../scripts/plist.js';
-import { ROOT, PACKAGED_FILES, readManifest } from '../scripts/lib/release.js';
+import { ROOT, PACKAGED_FILES, readManifest, readConfig } from '../scripts/lib/release.js';
 
 // One throwaway key for the whole file: generating RSA keys is the slowest
 // thing here and nothing below depends on a *particular* key.
@@ -299,6 +299,28 @@ describe('invariants over the shipped source', () => {
     assert.equal(manifest.host_permissions, undefined);
     assert.equal(manifest.content_scripts, undefined);
     assert.deepEqual(manifest.permissions, ['storage', 'tabs', 'tabGroups', 'idle', 'alarms']);
+  });
+});
+
+describe('the configured release destination', () => {
+  test('is https, since Chrome will not fetch an update over anything else', () => {
+    const { updateBaseUrl } = readConfig();
+    if (updateBaseUrl === null) return; // not configured yet; pack.js says so loudly
+    assert.match(updateBaseUrl, /^https:\/\//, 'an http update URL fails silently');
+  });
+
+  test('publishes to a directory git will actually track', () => {
+    // `*.crx` is gitignored, so a publishDir without a matching exception would
+    // push an update.xml pointing at a crx that was never committed — a 404 on
+    // every profile at once.
+    const { publishDir } = readConfig();
+    if (publishDir === null) return;
+
+    const ignore = readFileSync(join(ROOT, '.gitignore'), 'utf8');
+    assert.ok(
+      ignore.includes(`!${publishDir}/*.crx`),
+      `.gitignore must un-ignore ${publishDir}/*.crx or the published crx never ships`,
+    );
   });
 });
 

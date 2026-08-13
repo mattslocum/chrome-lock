@@ -58,6 +58,7 @@ export function readConfig() {
   return {
     signingKey: config.signingKey ?? 'keys/chrome-lock.pem',
     updateBaseUrl: config.updateBaseUrl ?? null,
+    publishDir: config.publishDir ?? null,
   };
 }
 

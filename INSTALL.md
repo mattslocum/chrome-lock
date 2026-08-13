@@ -65,17 +65,34 @@ pbpaste > escrow.json     # gitignored
 The bundle holds **no plaintext secret** — its private half is sealed under the
 master password — which is exactly why it is safe to hand to every profile.
 
-### 3. Decide where the crx will live, if you want auto-update
+### 3. Turn on GitHub Pages
 
-Set `updateBaseUrl` in `release.config.json` to wherever `dist/` will be served
-from over https — a GitHub Pages site is enough. This is the project's only
-network dependency, and it is install-time infrastructure, not runtime
-(architecture.md §9).
+The crx and `update.xml` are served from GitHub Pages out of `docs/` on `main`:
 
-You can skip it. Without an update URL there is no `ExtensionInstallForcelist`
-entry, and without that the extension can still be disabled — so skipping it
-means skipping the property this phase exists for. It is fine for a dry run and
-not fine for the real install.
+```
+updateBaseUrl  https://mattslocum.github.io/chrome-lock
+publishDir     docs
+```
+
+Both are already set in `release.config.json`. What is left is enabling Pages
+once, in the repo: **Settings → Pages → Source: Deploy from a branch → `main`,
+folder `/docs`**. The first deploy takes a minute or two; the site is live when
+`https://mattslocum.github.io/chrome-lock/update.xml` returns the XML rather than
+a 404.
+
+This is the project's only network dependency, and it is install-time
+infrastructure, not runtime (architecture.md §9).
+
+**Nothing secret is published.** The crx holds the same source that is already in
+a public repo. The escrow bundle goes in the plist, not the crx, and `keys/`,
+`dist/` and `escrow*.json` are gitignored. What *does* become public is the
+extension's existence and its code, which was always the intent — the whole point
+is that it is readable.
+
+You can leave `updateBaseUrl` unset for a dry run. But without an update URL there
+is no `ExtensionInstallForcelist` entry, and without that the extension can still
+be disabled — which is the property this whole phase exists to buy. Fine for a
+rehearsal, not for the real install.
 
 ---
 
@@ -86,13 +103,22 @@ npm test          # 125 tests; the packaging ones check what actually ships
 npm run pack      # → dist/chrome-lock-<version>.crx and dist/update.xml
 ```
 
-`pack` prints the extension id, the file count, and a SHA-256 of the crx. The
-build is **reproducible** — same sources, same key, same bytes — so that hash is
-worth recording next to the tag. It is what lets you check later that a crx in
-the wild is the one you built (architecture.md §10.8).
+`pack` writes the crx and `update.xml` into **both** `dist/` (the gitignored
+build output) and `docs/` (what Pages serves). It always writes the pair
+together: a crx published without an `update.xml` naming its version is an update
+Chrome never looks at, and an `update.xml` pointing at a crx that isn't there is a
+404 on every profile at once.
 
-Upload `dist/chrome-lock-<version>.crx` and `dist/update.xml` to the
-`updateBaseUrl` location.
+It prints the extension id, the file count, and a SHA-256 of the crx. The build is
+**reproducible** — same sources, same key, same bytes — so that hash is worth
+recording next to the tag. It is what lets you check later that a crx in the wild
+is the one you built (architecture.md §10.8).
+
+Publish by committing:
+
+```sh
+git add docs && git commit -m "Publish 0.6.0" && git push
+```
 
 ## Writing the policy file
 
@@ -178,11 +204,13 @@ a real machine behaves, so it has to be walked through by hand once.
 
 1. Bump `version` in `manifest.json` (Chrome compares against `update.xml`).
 2. `npm test && npm run pack`.
-3. Upload both files.
+3. Commit `docs/` and push. Pages redeploys on its own.
 
 Chrome polls roughly every five hours; `chrome://extensions` → Update forces it.
-Only the version in `update.xml` triggers a download, so publishing a crx without
-updating the xml does nothing.
+Only the version in `update.xml` triggers a download.
+
+Old crx files accumulate in `docs/` as versions go by. Leave them — that is the
+archive, and keeping the artifact you actually shipped is the point of §10.8.
 
 ## Backing out
 
