@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-03/schema#",
+  "title": "Chrome Lock policy",
+  "description": "Chrome reads chrome.storage.managed only for keys declared here, so the parent escrow bundle has to be described before a managed-preferences plist can deliver it. Nothing in this schema is secret: the escrow bundle's private half is sealed under the master password, which is why it is safe to hand to every profile on the machine.",
+  "type": "object",
+  "properties": {
+    "escrowBundle": {
+      "title": "Parent escrow key",
+      "description": "The RSA-OAEP key bundle whose private half is sealed under the parent master password. Generate it in the extension's settings page and paste the exported JSON here.",
+      "type": "object",
+      "properties": {
+        "v": { "type": "integer" },
+        "keyId": { "type": "string" },
+        "pub": { "type": "string" },
+        "privWrapped": {
+          "type": "object",
+          "properties": {
+            "iv": { "type": "string" },
+            "ct": { "type": "string" }
+          }
+        },
+        "salt": { "type": "string" },
+        "iterations": { "type": "integer" }
+      }
+    }
+  }
+}

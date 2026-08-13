@@ -337,6 +337,25 @@ child profile only ever touches the public key.
 **Decided:** asymmetric master password, escrow on all profiles including mine, and a
 master unlock never resets anything.
 
+**Implemented, with two corrections from this plan:**
+
+1. **Removing escrow ends parent unlock for the session locked right now, too.**
+   The first draft of it left `wrap_master` in place, reasoning that the dataKey was
+   already encrypted to that public key. That is true and useless: unwrapping it needs
+   the private key, which lives sealed *inside the bundle being removed*. So the wrap
+   becomes unopenable by anyone, and leaving it on disk would be dead state that still
+   looked like a recovery path (§9.5). It is cleared with the bundle. Nothing
+   destructive results — `wrap_pw` and the ciphertext are untouched, so the owner's own
+   password still opens the session.
+2. **`manifest.json` needs a `storage.managed_schema`.** Chrome exposes no managed key
+   that is not declared in a schema file, so without `managed-schema.json` the plist
+   distribution path (§7) would have silently delivered nothing.
+
+Also decided while building it: the master password has a **16-character minimum**,
+against 8 for a profile password, because it is the one credential here that is both
+offline-attackable and unlocks everything. The options page says why, and points at a
+password manager rather than at memorability.
+
 ### Recovery — decided: none
 
 **No printed recovery key, no second backstop.** The master password is the only
@@ -395,7 +414,7 @@ per-profile and fine. Move to the policy install once the extension is stable.
 | ~~**2. Lock engine**~~ ✅ | `manifest.json`, `service_worker.js`, `lock-engine.js`, `storage.js`, `settings.js`, lock + popup pages, `test/lock-engine.test.js` | **Done.** 43 tests pass. Manual lock closes everything and unlock restores; disable-resistance verified explicitly — after a lock, no captured URL appears anywhere in storage, and a fresh runtime given only that storage cannot open the snapshot, destroys nothing trying, and still yields the session to the correct password. Backoff enforced, protection mode self-heals across a simulated worker death. Note: the crypto design changed here — see §3 |
 | ~~**3. Fidelity + triggers**~~ ✅ | geometry, pinned, order, focus, tab groups; startup + idle + keyboard shortcut | **Done.** 49 tests pass. Groups restore with title, color and collapsed state, per window rather than merged; the window that had focus gets it back rather than the last one rebuilt; pinned tabs are never grouped (Chrome forbids it); a build without `chrome.tabGroups` still locks and restores. `commands` adds Cmd/Ctrl+Shift+L, dormant on an unconfigured profile; the idle threshold is reapplied on every worker start |
 | ~~**4. UI + settings**~~ ✅ | options page, password setup/change, backoff UI | **Done.** 67 tests pass. Password setup and change both live in real `type="password"` fields — no `window.prompt` anywhere. A change reseals the private key and is asserted to leave the ciphertext and the wrap byte-identical, so a session locked under the old password opens under the new one. Settings save as they are edited and the page renders what was *stored*, not what was clicked, because `settings.js` clamps untrusted input; the idle threshold is pushed to `chrome.idle` on change as well as on worker start. The lock screen shows a live countdown during backoff, resumed from storage so a recreated lock window or a restarted worker doesn't hand back a form that would just be refused |
-| **4b. Parent escrow** | keypair generation UI, `wrap_master`, "Parent unlock" on the lock screen, managed-storage read | Master password unlocks any profile including mine; the profile's own password still works afterward (no forced reset); escrow is visibly labeled |
+| ~~**4b. Parent escrow**~~ ✅ | keypair generation UI, `wrap_master`, "Parent unlock" on the lock screen, managed-storage read | **Done.** 81 tests pass. A master unlock restores the session and is asserted to leave the profile bundle byte-identical, so the owner's password keeps working; backoff covers the parent path, so it is not a way around a wait. The lock screen offers "Parent unlock" only when a `wrap_master` actually exists for *this* session — a session locked before escrow was set up cannot be opened by it, and advertising the option would be a lie. A managed bundle beats a locally installed one, so a child cannot shadow the parent's key with one whose password they chose, and under policy the profile cannot create, import, rotate or remove. `managed-schema.json` is what makes the plist path work at all: Chrome reads no managed key that is not declared. Two corrections found here — see §6 |
 | **5. Hardening** | sender validation audit, storage-tamper review, CSP, error paths, multi-profile test | Every `onMessage` handler checks `sender.id === chrome.runtime.id`; SW crash while locked recovers to a locked state; two profiles with different passwords lock/unlock independently and a dormant third profile stays silent |
 | **6. Distribution** | pack CRX, host `update.xml`, write the managed-preferences plist incl. the escrow bundle | Survives a Chrome restart and a profile switch; cannot be disabled from `chrome://extensions`; child profiles pick up the escrow bundle from managed storage automatically |
 

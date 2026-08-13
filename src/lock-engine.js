@@ -22,6 +22,7 @@ import {
   encryptSnapshot,
   generateDataKey,
   unwrapWithBundle,
+  validateKeyBundle,
   wipe,
   wrapToBundle,
 } from './crypto.js';
@@ -85,6 +86,135 @@ export async function changePassword(oldPassword, newPassword) {
   await storage.setProfileBundle(
     await changeBundlePassword(oldPassword, newPassword, bundle),
   );
+}
+
+// --- parent escrow ----------------------------------------------------------
+// The escrow bundle is the same key bundle as a profile's own (crypto.js), made
+// with the master password instead. Nothing here is secret: the private half is
+// sealed under a password this machine never holds, so the bundle is safe to
+// hand to every profile.
+
+/**
+ * The master password is the one credential where the "accidental and snoopy"
+ * threat model does not apply: `privWrapped` is readable by every profile on the
+ * machine, so it can be copied and ground offline where the backoff cannot see
+ * it — and it unlocks *everything*. Hence a longer floor than a profile password,
+ * and a nudge towards a generated passphrase rather than a memorable one.
+ */
+export const MIN_MASTER_PASSWORD_LENGTH = 16;
+
+/**
+ * What this profile knows about parent unlock, for the options and lock pages.
+ *
+ * `canUnlockNow` is the narrower question the lock screen has to ask: a bundle
+ * being present is not enough, because a session locked before escrow was set up
+ * has no `wrap_master` and cannot be opened by the master password however
+ * correct it is. Offering the option then would be a lie.
+ */
+export async function getEscrowStatus() {
+  const { bundle, source } = await storage.getEscrowRecord();
+  return {
+    available: bundle !== null,
+    source,
+    keyId: bundle?.keyId ?? null,
+    // The bundle itself, so the options page can offer it for copying into the
+    // plist. It holds no plaintext secret — that is the property that lets it be
+    // distributed to every profile in the first place.
+    bundle,
+    /** Managed bundles come from policy; the profile cannot edit or remove them. */
+    editable: source !== 'managed',
+    canUnlockNow: bundle !== null && (await storage.getMasterSnapshotWrap()) !== null,
+  };
+}
+
+/**
+ * Mint an escrow bundle from a master password and install it on this profile.
+ *
+ * Returns the bundle so the options page can show it for copying into the
+ * managed-preferences plist — which is where it belongs on a real install. This
+ * local copy is the development path, and any profile under policy ignores it.
+ *
+ * @param {string} masterPassword
+ * @returns {Promise<object>} the bundle, containing no plaintext secret
+ */
+export async function createEscrow(masterPassword) {
+  await assertEscrowEditable();
+  if (
+    typeof masterPassword !== 'string' ||
+    masterPassword.length < MIN_MASTER_PASSWORD_LENGTH
+  ) {
+    throw new LockError(
+      `The master password must be at least ${MIN_MASTER_PASSWORD_LENGTH} characters`,
+    );
+  }
+  const bundle = await createKeyBundle(masterPassword);
+  await storage.setLocalEscrowBundle(bundle);
+  return bundle;
+}
+
+/**
+ * Install a bundle the parent made elsewhere — the other half of createEscrow,
+ * for putting the same escrow key on a second profile without retyping the
+ * master password into it.
+ *
+ * Validated by actually wrapping to its public key, because this input is pasted
+ * by hand: a bundle that only looks right would fail at lock time, silently
+ * costing the recovery path exactly when it was needed.
+ */
+export async function importEscrow(bundle) {
+  await assertEscrowEditable();
+  if (!(await validateKeyBundle(bundle))) {
+    throw new LockError('That is not a valid escrow bundle');
+  }
+  await storage.setLocalEscrowBundle(bundle);
+  return bundle;
+}
+
+/**
+ * Forget the escrow bundle, ending parent unlock on this profile.
+ *
+ * This takes the currently locked session with it, and it has to: unwrapping
+ * `wrap_master` needs the private key that lives, sealed, in the bundle being
+ * removed. Without the bundle that wrap is unopenable by anyone — so it is
+ * cleared too rather than left on disk as a record nothing can read (an escrow
+ * that no longer works must not keep looking like one).
+ *
+ * Not destructive in the sense that matters: `wrap_pw` and the ciphertext are
+ * untouched, so the profile's own password still opens the session. The only
+ * thing lost is the recovery path, which is exactly what was asked for.
+ */
+export async function removeEscrow() {
+  await assertEscrowEditable();
+  await storage.clearLocalEscrowBundle();
+  await storage.setMasterSnapshotWrap(null);
+}
+
+/**
+ * Rotate the master password. The keypair is untouched, so `pub`, `keyId` and
+ * every `wrap_master` ever written on any profile stay valid — a rotation costs
+ * nothing and strands no session.
+ */
+export async function changeMasterPassword(oldPassword, newPassword) {
+  const { bundle, source } = await storage.getEscrowRecord();
+  if (!bundle) throw new LockError('No parent master password is set up');
+  if (source === 'managed') {
+    throw new LockError('This escrow key comes from policy; rotate it in the plist');
+  }
+  if (typeof newPassword !== 'string' || newPassword.length < MIN_MASTER_PASSWORD_LENGTH) {
+    throw new LockError(
+      `The master password must be at least ${MIN_MASTER_PASSWORD_LENGTH} characters`,
+    );
+  }
+  const rotated = await changeBundlePassword(oldPassword, newPassword, bundle);
+  await storage.setLocalEscrowBundle(rotated);
+  return rotated;
+}
+
+async function assertEscrowEditable() {
+  const { source } = await storage.getEscrowRecord();
+  if (source === 'managed') {
+    throw new LockError('The escrow key on this profile is set by policy and cannot be changed here');
+  }
 }
 
 // --- lock -------------------------------------------------------------------

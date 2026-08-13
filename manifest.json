@@ -1,11 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Chrome Lock",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Password lock for a Chrome profile. Locking encrypts and closes your tabs; only your password brings them back.",
   "minimum_chrome_version": "120",
   "incognito": "split",
   "permissions": ["storage", "tabs", "tabGroups", "idle", "alarms"],
+  "storage": {
+    "managed_schema": "managed-schema.json"
+  },
   "commands": {
     "lock-now": {
       "suggested_key": {

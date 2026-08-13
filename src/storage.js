@@ -19,8 +19,10 @@
  *   backoff        failed-attempt count and the time attempts resume.
  *   settings       triggers and delays.
  *
- * The escrow bundle is *not* in this list: it arrives via chrome.storage.managed,
- * which the profile cannot write to. See getEscrowBundle.
+ *   escrowBundleLocal  a parent escrow bundle installed by this profile, for
+ *                  development and for machines with no policy. Also no plaintext
+ *                  secret. A bundle from chrome.storage.managed, which the profile
+ *                  cannot write to, takes precedence — see getEscrowRecord.
  */
 
 const KEYS = {
@@ -73,19 +75,30 @@ export async function isConfigured() {
  * whole reason escrow is distributed this way. The local fallback exists so
  * escrow can be exercised during development without a plist.
  *
- * @returns {Promise<object|null>}
+ * Managed wins when both exist. A profile that is under policy should behave the
+ * same whatever it happens to have in its own storage: otherwise a child could
+ * shadow the parent's escrow key with one whose password they chose, which would
+ * silently disable the recovery path while the options page still claimed it was
+ * there.
+ *
+ * @returns {Promise<{bundle: object, source: 'managed'|'local'}|{bundle: null, source: null}>}
  */
-export async function getEscrowBundle() {
+export async function getEscrowRecord() {
   try {
     const managed = await chrome.storage.managed.get('escrowBundle');
-    if (managed?.escrowBundle) return managed.escrowBundle;
+    if (managed?.escrowBundle) return { bundle: managed.escrowBundle, source: 'managed' };
   } catch {
     // No managed policy is configured for this profile. Expected, not an error.
   }
-  return get(KEYS.escrowFallback);
+  const local = await get(KEYS.escrowFallback);
+  return local ? { bundle: local, source: 'local' } : { bundle: null, source: null };
 }
 
+/** @returns {Promise<object|null>} */
+export const getEscrowBundle = async () => (await getEscrowRecord()).bundle;
+
 export const setLocalEscrowBundle = (bundle) => set(KEYS.escrowFallback, bundle);
+export const clearLocalEscrowBundle = () => chrome.storage.local.remove(KEYS.escrowFallback);
 
 // --- the locked session -----------------------------------------------------
 

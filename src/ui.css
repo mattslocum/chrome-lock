@@ -87,6 +87,22 @@ button.secondary {
   color: var(--fg);
 }
 
+/*
+ * A button that reads as a link. Used for "Parent unlock" on the lock screen:
+ * the option has to be visible — escrow is not a hidden backdoor — without
+ * competing with the password field it sits under.
+ */
+button.link {
+  align-self: center;
+  margin-top: 14px;
+  padding: 4px;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 400;
+  font-size: 13px;
+  text-decoration: underline;
+}
+
 .message {
   min-height: 20px;
   font-size: 13px;
@@ -191,6 +207,37 @@ select {
 
 select:disabled {
   opacity: 0.55;
+}
+
+/*
+ * The escrow bundle, shown for copying to another profile or into the plist. It
+ * is long and it is JSON, so it gets a monospace box that scrolls rather than a
+ * paragraph that wraps into noise.
+ */
+textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  resize: vertical;
+}
+
+/* Secondary escrow actions stay folded away: routine settings are not this. */
+details {
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+summary {
+  color: var(--accent);
+  cursor: pointer;
+}
+
+details > * {
+  margin-top: 10px;
 }
 
 code {

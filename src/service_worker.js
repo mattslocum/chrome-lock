@@ -115,8 +115,26 @@ const HANDLERS = {
     return {
       configured: await storage.isConfigured(),
       lockState: await storage.getLockState(),
-      escrowAvailable: (await storage.getEscrowBundle()) !== null,
+      escrow: await engine.getEscrowStatus(),
     };
+  },
+
+  /** Mint an escrow key. The bundle comes back so it can be copied to the plist. */
+  async createEscrow({ masterPassword }) {
+    return { ok: true, bundle: await engine.createEscrow(masterPassword) };
+  },
+
+  async importEscrow({ bundle }) {
+    return { ok: true, bundle: await engine.importEscrow(bundle) };
+  },
+
+  async removeEscrow() {
+    await engine.removeEscrow();
+    return { ok: true };
+  },
+
+  async changeMasterPassword({ oldPassword, newPassword }) {
+    return { ok: true, bundle: await engine.changeMasterPassword(oldPassword, newPassword) };
   },
 
   async setUpPassword({ password }) {

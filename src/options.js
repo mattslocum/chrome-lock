@@ -11,6 +11,14 @@
  */
 
 const MIN_PASSWORD_LENGTH = 8;
+/**
+ * Longer than a profile password, because the master password unlocks every
+ * profile and its sealed key is readable by anyone on this computer, so it can be
+ * ground offline where the lock screen's backoff cannot see it. Duplicated from
+ * the engine rather than imported: pages talk to the worker and never load it.
+ * The engine enforces this; here it only decides what the form says.
+ */
+const MIN_MASTER_PASSWORD_LENGTH = 16;
 const SHORTCUTS_PAGE = 'chrome://extensions/shortcuts';
 const LOCK_COMMAND = 'lock-now';
 
@@ -79,9 +87,9 @@ el('change-form').addEventListener('submit', async (event) => {
 });
 
 /** @returns {string|null} what is wrong with the proposed password, if anything */
-function checkNewPassword(password, confirmation) {
-  if (password.length < MIN_PASSWORD_LENGTH) {
-    return `Use at least ${MIN_PASSWORD_LENGTH} characters.`;
+function checkNewPassword(password, confirmation, minLength = MIN_PASSWORD_LENGTH) {
+  if (password.length < minLength) {
+    return `Use at least ${minLength} characters.`;
   }
   if (password !== confirmation) return 'The two passwords do not match.';
   return null;
@@ -154,14 +162,141 @@ async function showShortcut() {
  * profile, this page says so in as many words — including on my own profile, where
  * it is also true.
  */
-function showEscrow(available) {
-  el('escrow-status').textContent = available
-    ? 'A parent master password can unlock this profile, so a forgotten password ' +
-      'is recoverable. Unlocking this way shows whoever holds that password the tabs ' +
-      'you had open. It does not change or reveal your own password, which keeps working.'
-    : 'No parent master password is set up on this computer, so nothing but your own ' +
-      'password can open a locked session on this profile. Forget it and those tabs are gone.';
+const ESCROW_COPY = {
+  managed:
+    'A parent master password can unlock this profile. It is set for every profile on ' +
+    'this computer by an administrator, so it cannot be changed or removed here. ' +
+    'Unlocking that way shows whoever holds that password the tabs you had open. It ' +
+    'does not change or reveal your own password, which keeps working.',
+  local:
+    'A parent master password can unlock this profile, so a forgotten password is ' +
+    'recoverable. Unlocking that way shows whoever holds that password the tabs you had ' +
+    'open. It does not change or reveal your own password, which keeps working.',
+  none:
+    'No parent master password is set up on this profile, so nothing but your own ' +
+    'password can open a locked session here. Forget it and those tabs are gone.',
+};
+
+function showEscrow(escrow) {
+  const source = escrow?.available ? escrow.source : 'none';
+  el('escrow-status').textContent = ESCROW_COPY[source] ?? ESCROW_COPY.none;
+
+  // Managed escrow is policy: neither branch of the editing UI applies.
+  el('escrow-create').hidden = escrow?.available === true || escrow?.editable !== true;
+  el('escrow-manage').hidden = !(escrow?.available === true && escrow?.editable === true);
+
+  if (escrow?.bundle) {
+    el('escrow-key-id').textContent = escrow.keyId;
+    el('escrow-bundle').value = JSON.stringify(escrow.bundle);
+  }
 }
+
+el('escrow-create-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const message = el('escrow-create-message');
+  const masterPassword = el('escrow-new').value;
+
+  const complaint = checkNewPassword(
+    masterPassword,
+    el('escrow-confirm').value,
+    MIN_MASTER_PASSWORD_LENGTH,
+  );
+  if (complaint) {
+    message.textContent = complaint;
+    message.classList.remove('ok');
+    return;
+  }
+
+  // Another RSA keygen, another second of waiting to account for.
+  message.textContent = 'Generating an escrow key…';
+  message.classList.add('ok');
+  const result = await withButtonDisabled(el('escrow-create-submit'), () =>
+    chrome.runtime.sendMessage({ type: 'createEscrow', masterPassword }),
+  );
+  clearFields('escrow-new', 'escrow-confirm');
+
+  if (!result?.ok) {
+    message.classList.remove('ok');
+    message.textContent = result?.error ?? 'Could not set up parent unlock.';
+    return;
+  }
+  message.textContent = '';
+  message.classList.remove('ok');
+  await render();
+});
+
+el('escrow-import-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const message = el('escrow-import-message');
+  message.classList.remove('ok');
+
+  let bundle;
+  try {
+    bundle = JSON.parse(el('escrow-import').value);
+  } catch {
+    message.textContent = 'That is not a valid escrow key.';
+    return;
+  }
+
+  const result = await withButtonDisabled(el('escrow-import-submit'), () =>
+    chrome.runtime.sendMessage({ type: 'importEscrow', bundle }),
+  );
+  if (!result?.ok) {
+    message.textContent = result?.error ?? 'Could not install that escrow key.';
+    return;
+  }
+  el('escrow-import').value = '';
+  message.textContent = '';
+  await render();
+});
+
+el('escrow-rotate-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const message = el('escrow-rotate-message');
+  const newPassword = el('escrow-rotate-new').value;
+
+  const complaint = checkNewPassword(
+    newPassword,
+    el('escrow-rotate-confirm').value,
+    MIN_MASTER_PASSWORD_LENGTH,
+  );
+  if (complaint) {
+    message.textContent = complaint;
+    message.classList.remove('ok');
+    return;
+  }
+
+  const result = await withButtonDisabled(el('escrow-rotate-submit'), () =>
+    chrome.runtime.sendMessage({
+      type: 'changeMasterPassword',
+      oldPassword: el('escrow-old').value,
+      newPassword,
+    }),
+  );
+  clearFields('escrow-old', 'escrow-rotate-new', 'escrow-rotate-confirm');
+
+  if (!result?.ok) {
+    message.classList.remove('ok');
+    message.textContent = result?.error ?? 'Could not change the master password.';
+    return;
+  }
+  message.textContent = 'Master password changed. Copy the key again to update other profiles.';
+  message.classList.add('ok');
+  showEscrow({ ...result, available: true, source: 'local', editable: true, keyId: result.bundle.keyId });
+});
+
+el('escrow-remove').addEventListener('click', async () => {
+  const message = el('escrow-manage-message');
+  const result = await withButtonDisabled(el('escrow-remove'), () =>
+    chrome.runtime.sendMessage({ type: 'removeEscrow' }),
+  );
+  if (!result?.ok) {
+    message.textContent = result?.error ?? 'Could not remove the escrow key.';
+    return;
+  }
+  message.textContent = '';
+  await render();
+});
 
 // --- render -----------------------------------------------------------------
 
@@ -174,7 +309,7 @@ async function render() {
   // Triggers are meaningless on a dormant profile: none of them can fire.
   triggers.hidden = !configured;
 
-  showEscrow(status?.escrowAvailable === true);
+  showEscrow(status?.escrow);
 
   if (!configured) {
     el('setup-new').focus();

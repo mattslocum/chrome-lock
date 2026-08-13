@@ -160,6 +160,40 @@ export async function wrapToBundle(bundle, dataKey) {
 }
 
 /**
+ * Whether `bundle` is a usable key bundle.
+ *
+ * Structural checks are not enough: an escrow bundle can arrive by being pasted
+ * into the options page or written into a managed-preferences plist by hand, so
+ * the only answer worth trusting is whether its public half actually encrypts.
+ * A bundle that passes here can wrap a dataKey at lock time — which is the one
+ * moment where a broken bundle would be discovered far too late to matter.
+ *
+ * Says nothing about the private half: that needs the password, and the parent
+ * is the only one who has it.
+ *
+ * @param {unknown} bundle
+ * @returns {Promise<boolean>}
+ */
+export async function validateKeyBundle(bundle) {
+  if (!bundle || typeof bundle !== 'object') return false;
+  const { v, keyId, pub, privWrapped, salt, iterations } = bundle;
+  if (v !== FORMAT_VERSION) return false;
+  if (typeof keyId !== 'string' || typeof pub !== 'string' || typeof salt !== 'string') {
+    return false;
+  }
+  if (!Number.isInteger(iterations) || iterations < 1) return false;
+  if (!privWrapped || typeof privWrapped.iv !== 'string' || typeof privWrapped.ct !== 'string') {
+    return false;
+  }
+  try {
+    await wrapToBundle(bundle, generateDataKey());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Unlock path: password -> bundle's private key -> dataKey.
  *
  * There is deliberately no stored password *verifier*. RSA-OAEP and AES-GCM are

@@ -58,8 +58,9 @@ service_worker.js       orchestration, message router, lifecycle
 
 lock.html    / lock.js        lock window — password field, parent-unlock option
 popup.html   / popup.js       toolbar — Lock now / Settings, or first-run setup
-options.html / options.js     password setup and change, triggers, escrow status
+options.html / options.js     password setup and change, triggers, escrow admin
 ui.css                        shared styling for the extension pages
+managed-schema.json           declares the escrow bundle so policy can deliver it
 ```
 
 **No page touches `crypto.subtle` or storage.** Every one of them is a form plus
@@ -333,8 +334,32 @@ it is safe to distribute to every profile.
 
 `chrome.storage.managed`, populated from the same macOS managed-preferences plist used
 for force-install (§8), under the extension's `3rdparty` key. Managed storage is
-read-only to the extension and unwritable by the kids. Development fallback: paste the
-bundle into the options page.
+read-only to the extension and unwritable by the kids. Development fallback: generate or
+paste the bundle in the options page, which stores it in `storage.local`.
+
+Chrome exposes no managed key that a schema has not declared, so `managed-schema.json`
+(referenced from the manifest's `storage.managed_schema`) is a precondition for the
+plist path working at all rather than a formality.
+
+**A managed bundle beats a locally installed one.** Otherwise a profile under policy
+could shadow the parent's escrow key with one whose password it chose, silently removing
+the recovery path while every page still reported escrow as available.
+
+### Editing it
+
+Generating, importing, rotating and removing all live in the options page, and all four
+are refused when the bundle came from policy — a managed profile is administered from
+the plist. Rotation reseals `privWrapped` and leaves the keypair alone, so no profile
+anywhere is stranded by it.
+
+**Removing escrow ends parent unlock for the currently locked session too**, and clears
+`wrap_master` along with the bundle. The wrap alone is unopenable — the private key that
+would read it is sealed inside the bundle being removed — so keeping it would be dead
+state that still looked like a recovery path. `wrap_pw` and the ciphertext are untouched,
+so the owner's password still opens everything.
+
+The master password has a 16-character minimum against a profile password's 8, because
+it is the one credential that is both offline-attackable and able to open every profile.
 
 ### At lock time
 
@@ -345,7 +370,12 @@ profile only ever handles the public half.
 
 "Parent unlock" on the lock screen → master password → unwrap `priv` → RSA-decrypt
 `wrap_master` → `dataKey` → decrypt and restore. Identical to a normal unlock but for
-which bundle and which wrap it reads.
+which bundle and which wrap it reads — backoff (§5) included, so it is not a way around
+a wait.
+
+The option appears **only when a `wrap_master` exists for this session**. A session
+locked before escrow was set up carries no escrow wrap and no master password can open
+it, so offering the path there would be an advertisement for something that cannot work.
 
 **It restores and stops.** A master unlock never resets a password: `wrap_pw` is
 untouched and the profile's own password keeps working, because the common case is

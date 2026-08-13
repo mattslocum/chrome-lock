@@ -98,6 +98,91 @@
     <section class="card">
       <h2>Parent unlock</h2>
       <p id="escrow-status">Checking…</p>
+
+      <!-- No escrow key here yet, and this profile is free to install one. -->
+      <div id="escrow-create" hidden>
+        <form id="escrow-create-form">
+          <label for="escrow-new">Master password</label>
+          <input type="password" id="escrow-new" autocomplete="new-password" />
+          <label for="escrow-confirm">Confirm master password</label>
+          <input type="password" id="escrow-confirm" autocomplete="new-password" />
+          <p class="hint">
+            Use a long generated passphrase from a password manager, not something
+            memorable. This one password opens every profile, and unlike the profile
+            passwords it can be attacked offline by anyone using this computer.
+          </p>
+          <div class="row">
+            <button type="submit" id="escrow-create-submit">Set up parent unlock</button>
+          </div>
+          <div class="message" id="escrow-create-message" role="alert"></div>
+        </form>
+
+        <details>
+          <summary>I already made an escrow key on another profile</summary>
+          <form id="escrow-import-form">
+            <label for="escrow-import">Escrow key</label>
+            <textarea id="escrow-import" rows="5" spellcheck="false"></textarea>
+            <p class="hint">
+              Installs the same escrow key here, so one master password covers both
+              profiles. It contains no secret, so pasting it around is safe.
+            </p>
+            <div class="row">
+              <button type="submit" id="escrow-import-submit">Install escrow key</button>
+            </div>
+            <div class="message" id="escrow-import-message" role="alert"></div>
+          </form>
+        </details>
+      </div>
+
+      <!-- An escrow key installed by this profile: show it, rotate it, remove it. -->
+      <div id="escrow-manage" hidden>
+        <div class="row">
+          <span>Escrow key</span>
+          <code id="escrow-key-id"></code>
+        </div>
+
+        <details>
+          <summary>Copy this key onto other profiles</summary>
+          <textarea id="escrow-bundle" rows="5" readonly spellcheck="false"></textarea>
+          <p class="hint">
+            Paste this into another profile's settings, or into the managed-preferences
+            plist under <code>escrowBundle</code> to hand it to every profile at once.
+            The private half is sealed under the master password, so this text reveals
+            nothing.
+          </p>
+        </details>
+
+        <details>
+          <summary>Change the master password</summary>
+          <form id="escrow-rotate-form">
+            <label for="escrow-old">Current master password</label>
+            <input type="password" id="escrow-old" autocomplete="current-password" />
+            <label for="escrow-rotate-new">New master password</label>
+            <input type="password" id="escrow-rotate-new" autocomplete="new-password" />
+            <label for="escrow-rotate-confirm">Confirm new master password</label>
+            <input type="password" id="escrow-rotate-confirm" autocomplete="new-password" />
+            <p class="hint">
+              The key itself does not change, so every profile keeps working and no
+              locked session is stranded.
+            </p>
+            <div class="row">
+              <button type="submit" id="escrow-rotate-submit">Change master password</button>
+            </div>
+            <div class="message" id="escrow-rotate-message" role="alert"></div>
+          </form>
+        </details>
+
+        <div class="row">
+          <button type="button" class="secondary" id="escrow-remove">
+            Stop escrowing this profile
+          </button>
+        </div>
+        <p class="hint">
+          The master password stops opening this profile, including any session locked
+          right now. Your own password is unaffected and still opens everything.
+        </p>
+        <div class="message" id="escrow-manage-message" role="alert"></div>
+      </div>
     </section>
 
     <!-- The honest limits --------------------------------------------------- -->

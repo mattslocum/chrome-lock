@@ -524,3 +524,214 @@ describe('backoff is visible to a freshly opened lock window', () => {
     assert.ok(await engine.backoffRemainingMs() > 0);
   });
 });
+
+/**
+ * Parent escrow: the second and last unlock path.
+ *
+ * The properties worth pinning down are the ones a family depends on rather than
+ * the ones a cryptographer would list. A parent can open a kid's session; doing
+ * so changes nothing about the kid's own password; a profile under policy cannot
+ * quietly swap the escrow key for one it chose; and every one of these paths
+ * fails without destroying a session.
+ */
+describe('parent escrow', () => {
+  const MASTER = 'a-long-generated-master-passphrase';
+  const FAST = { iterations: 1000 };
+
+  /** A cheap escrow bundle. Real ones cost 600k iterations; the mechanism is identical. */
+  async function escrowBundle(password = MASTER) {
+    const { createKeyBundle } = await import('../src/crypto.js');
+    return createKeyBundle(password, FAST);
+  }
+
+  describe('installing a key', () => {
+    test('rejects a master password short enough to be memorable', async () => {
+      await assert.rejects(() => engine.createEscrow('short-one'), engine.LockError);
+      assert.equal((await engine.getEscrowStatus()).available, false);
+    });
+
+    test('rejects anything that is not a working key bundle', async () => {
+      const real = await escrowBundle();
+      const cases = {
+        'not an object': 'nonsense',
+        'missing the public half': { ...real, pub: undefined },
+        // Structurally perfect and still useless: the check is whether it encrypts.
+        'a corrupted public key': { ...real, pub: real.privWrapped.ct },
+      };
+      for (const [name, bundle] of Object.entries(cases)) {
+        await assert.rejects(() => engine.importEscrow(bundle), engine.LockError, name);
+      }
+      assert.equal((await engine.getEscrowStatus()).available, false);
+    });
+
+    test('accepts a bundle exported from another profile', async () => {
+      const bundle = await escrowBundle();
+      await engine.importEscrow(bundle);
+
+      const status = await engine.getEscrowStatus();
+      assert.equal(status.available, true);
+      assert.equal(status.source, 'local');
+      assert.equal(status.keyId, bundle.keyId);
+      assert.equal(status.editable, true);
+    });
+  });
+
+  describe('unlocking as a parent', () => {
+    test('opens the session, and the profile password still works afterwards', async () => {
+      await engine.importEscrow(await escrowBundle());
+      openTypicalWindow();
+      await engine.lock('manual');
+      const profileBundleBefore = await storage.getProfileBundle();
+
+      assert.deepEqual(await engine.unlock(MASTER, 'master'), { ok: true });
+      assert.deepEqual(
+        fake.listWindows()[0].tabs.map((tab) => tab.url),
+        TABS.map((tab) => tab.url),
+      );
+
+      // The whole point of "it restores and stops": nothing is reset.
+      assert.deepEqual(await storage.getProfileBundle(), profileBundleBefore);
+      openTypicalWindow();
+      await engine.lock('manual');
+      assert.deepEqual(await engine.unlock(PASSWORD), { ok: true });
+    });
+
+    test('a wrong master password leaves the lock and the snapshot intact', async () => {
+      await engine.importEscrow(await escrowBundle());
+      openTypicalWindow();
+      await engine.lock('manual');
+
+      const result = await engine.unlock('a-long-but-wrong-passphrase', 'master');
+      assert.equal(result.ok, false);
+      assert.equal((await storage.getLockState()).isLocked, true);
+      assert.notEqual(await storage.getSnapshot(), null);
+    });
+
+    test('the profile password is not accepted on the parent path, or vice versa', async () => {
+      await engine.importEscrow(await escrowBundle());
+      openTypicalWindow();
+      await engine.lock('manual');
+
+      assert.equal((await engine.unlock(PASSWORD, 'master')).ok, false);
+      assert.equal((await engine.unlock(MASTER, 'password')).ok, false);
+      assert.deepEqual(await engine.unlock(PASSWORD), { ok: true }, 'and neither guess broke it');
+    });
+
+    test('backoff covers the parent path too, so it is not a way around a wait', async () => {
+      await engine.importEscrow(await escrowBundle());
+      openTypicalWindow();
+      await engine.lock('manual');
+
+      for (let i = 0; i < 4; i++) await engine.unlock('wrong', 'password');
+      const result = await engine.unlock(MASTER, 'master');
+
+      assert.equal(result.ok, false, 'the correct master password waits its turn');
+      assert.ok(result.retryAfterMs > 0);
+      assert.equal((await storage.getLockState()).isLocked, true);
+    });
+
+    test('is offered only when it could actually work', async () => {
+      // Locked before escrow existed: there is no wrap to open, so the lock
+      // screen must not advertise a path that cannot succeed.
+      openTypicalWindow();
+      await engine.lock('manual');
+      await engine.importEscrow(await escrowBundle());
+
+      assert.equal((await engine.getEscrowStatus()).canUnlockNow, false);
+      assert.equal((await engine.unlock(MASTER, 'master')).ok, false);
+      assert.deepEqual(await engine.unlock(PASSWORD), { ok: true }, 'the owner is unaffected');
+
+      openTypicalWindow();
+      await engine.lock('manual');
+      assert.equal((await engine.getEscrowStatus()).canUnlockNow, true);
+    });
+  });
+
+  describe('under policy', () => {
+    test('a managed bundle wins over anything the profile installed itself', async () => {
+      const managed = await escrowBundle('the-managed-master-passphrase');
+      await engine.importEscrow(await escrowBundle());
+      fake.setManaged('escrowBundle', managed);
+
+      const status = await engine.getEscrowStatus();
+      assert.equal(status.source, 'managed');
+      assert.equal(status.keyId, managed.keyId);
+      assert.equal(status.editable, false);
+
+      // And the wrap follows the managed key, so a child cannot shadow the
+      // parent's escrow with one whose password they chose.
+      openTypicalWindow();
+      await engine.lock('manual');
+      assert.equal((await engine.unlock(MASTER, 'master')).ok, false);
+      assert.deepEqual(
+        await engine.unlock('the-managed-master-passphrase', 'master'),
+        { ok: true },
+      );
+    });
+
+    test('the profile cannot change or remove a key set by policy', async () => {
+      fake.setManaged('escrowBundle', await escrowBundle());
+
+      for (const attempt of [
+        () => engine.createEscrow('another-long-master-passphrase'),
+        () => engine.importEscrow(escrowBundle()),
+        () => engine.removeEscrow(),
+        () => engine.changeMasterPassword(MASTER, 'another-long-master-passphrase'),
+      ]) {
+        await assert.rejects(attempt, engine.LockError);
+      }
+      assert.equal((await engine.getEscrowStatus()).source, 'managed');
+    });
+  });
+
+  describe('rotating and removing', () => {
+    test('a new master password opens a session locked under the old one', async () => {
+      await engine.importEscrow(await escrowBundle());
+      openTypicalWindow();
+      await engine.lock('manual');
+      const wrapBefore = await storage.getMasterSnapshotWrap();
+
+      const rotated = await engine.changeMasterPassword(MASTER, 'the-next-master-passphrase');
+
+      // The keypair is untouched, so no profile anywhere is stranded by a rotation.
+      assert.equal(rotated.keyId, (await storage.getEscrowBundle()).keyId);
+      assert.deepEqual(await storage.getMasterSnapshotWrap(), wrapBefore);
+      assert.equal((await engine.unlock(MASTER, 'master')).ok, false);
+      assert.deepEqual(
+        await engine.unlock('the-next-master-passphrase', 'master'),
+        { ok: true },
+      );
+    });
+
+    test('a wrong current master password changes nothing', async () => {
+      await engine.importEscrow(await escrowBundle());
+      const before = await storage.getEscrowBundle();
+
+      await assert.rejects(() =>
+        engine.changeMasterPassword('not-the-master-passphrase', 'a-long-new-passphrase'),
+      );
+      assert.deepEqual(await storage.getEscrowBundle(), before);
+    });
+
+    test('removing escrow ends parent unlock without stranding the owner', async () => {
+      await engine.importEscrow(await escrowBundle());
+      openTypicalWindow();
+      await engine.lock('manual');
+
+      await engine.removeEscrow();
+
+      // The private key that could open wrap_master went with the bundle, so the
+      // wrap is unreadable by anyone — it must not linger looking like a path.
+      assert.equal((await engine.getEscrowStatus()).available, false);
+      assert.equal(await storage.getMasterSnapshotWrap(), null);
+      assert.equal((await engine.unlock(MASTER, 'master')).ok, false);
+
+      // And the thing that must never break: the owner's own session.
+      assert.deepEqual(await engine.unlock(PASSWORD), { ok: true });
+      assert.deepEqual(
+        fake.listWindows()[0].tabs.map((tab) => tab.url),
+        TABS.map((tab) => tab.url),
+      );
+    });
+  });
+});

@@ -8,7 +8,7 @@
   <body>
     <div class="center">
       <h1>This profile is locked</h1>
-      <p>Enter your password to restore your tabs.</p>
+      <p id="prompt">Enter your password to restore your tabs.</p>
       <form id="unlock-form">
         <input
           type="password"
@@ -20,6 +20,12 @@
         <button type="submit" id="submit">Unlock</button>
         <div class="message" id="message" role="alert"></div>
       </form>
+      <!--
+        Escrow is an openly labeled feature, not a hidden backdoor: if a parent
+        can open this profile, the lock screen says so. Shown only when a master
+        password could actually work on *this* session.
+      -->
+      <button type="button" class="link" id="toggle-mode" hidden>Parent unlock</button>
     </div>
     <script type="module" src="lock.js"></script>
   </body>
