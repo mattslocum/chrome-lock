@@ -8,8 +8,15 @@
       body {
         width: 260px;
       }
-      [hidden] {
-        display: none !important;
+      /* The popup's sections are not forms, so they need their own stacking. */
+      section {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      section h1,
+      section p {
+        margin: 0;
       }
     </style>
   </head>
@@ -31,9 +38,10 @@
           autocomplete="new-password"
           placeholder="Confirm password"
         />
-        <button type="submit">Set password</button>
+        <button type="submit" id="setup-submit">Set password</button>
         <div class="message" id="setup-message" role="alert"></div>
       </form>
+      <button type="button" class="secondary" id="setup-settings">Settings</button>
     </section>
 
     <!-- Configured: the one action this phase offers. -->
@@ -41,6 +49,7 @@
       <h1>Chrome Lock</h1>
       <p>Locking encrypts your open tabs and closes them.</p>
       <button id="lock-now">Lock now</button>
+      <button type="button" class="secondary" id="ready-settings">Settings</button>
       <div class="message" id="ready-message" role="alert"></div>
     </section>
 

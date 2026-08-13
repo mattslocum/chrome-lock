@@ -451,8 +451,15 @@ function removeWindow(windowId) {
 
 // --- failed attempts --------------------------------------------------------
 
-/** @returns {Promise<number>} ms still to wait, 0 if an attempt is allowed now */
-async function backoffRemainingMs() {
+/**
+ * How long the lock screen must wait before its next attempt. Exported so the
+ * lock window can show a live countdown rather than only learning about the
+ * backoff by being refused — and so a lock window recreated mid-backoff (or one
+ * reopened after the worker died) starts out in the right state.
+ *
+ * @returns {Promise<number>} ms still to wait, 0 if an attempt is allowed now
+ */
+export async function backoffRemainingMs() {
   const { nextAttemptAt } = await storage.getBackoff();
   return Math.max(0, nextAttemptAt - Date.now());
 }

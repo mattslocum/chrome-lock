@@ -438,3 +438,89 @@ describe('disabling the extension must not restore tabs', () => {
     );
   });
 });
+
+/**
+ * The point of changing a password is that it reseals the private key and
+ * nothing else: the keypair, and therefore every wrap and the ciphertext, must
+ * survive untouched. A change that re-encrypted the snapshot would be a change
+ * that could lose it.
+ */
+describe('changing the password', () => {
+  const NEW_PASSWORD = 'a-different-long-password';
+
+  test('the new password opens a session locked under the old one', async () => {
+    openTypicalWindow();
+    await engine.lock('manual');
+    const wrapBefore = await storage.getPasswordSnapshotWrap();
+    const snapshotBefore = await storage.getSnapshot();
+
+    await engine.changePassword(PASSWORD, NEW_PASSWORD);
+
+    assert.deepEqual(await storage.getPasswordSnapshotWrap(), wrapBefore, 'wrap untouched');
+    assert.deepEqual(await storage.getSnapshot(), snapshotBefore, 'ciphertext untouched');
+    assert.deepEqual(await engine.unlock(NEW_PASSWORD), { ok: true });
+    assert.deepEqual(
+      fake.listWindows()[0].tabs.map((tab) => tab.url),
+      TABS.map((tab) => tab.url),
+    );
+  });
+
+  test('the old password stops working once it is changed', async () => {
+    await engine.changePassword(PASSWORD, NEW_PASSWORD);
+    openTypicalWindow();
+    await engine.lock('manual');
+
+    assert.equal((await engine.unlock(PASSWORD)).ok, false);
+    assert.notEqual(await storage.getSnapshot(), null, 'and a wrong guess destroys nothing');
+  });
+
+  test('a wrong current password changes nothing', async () => {
+    const before = await storage.getProfileBundle();
+    await assert.rejects(() => engine.changePassword('not-the-password', NEW_PASSWORD));
+    assert.deepEqual(await storage.getProfileBundle(), before);
+  });
+
+  test('rejects a new password that is too short, without checking the old one', async () => {
+    const before = await storage.getProfileBundle();
+    await assert.rejects(() => engine.changePassword(PASSWORD, 'short'), engine.LockError);
+    assert.deepEqual(await storage.getProfileBundle(), before);
+  });
+
+  test('a dormant profile has no password to change', async () => {
+    globalThis.chrome = createFakeChrome().chrome;
+    await assert.rejects(() => engine.changePassword(PASSWORD, NEW_PASSWORD), engine.LockError);
+  });
+});
+
+/**
+ * The lock window is recreated whenever it is closed and the worker is torn down
+ * constantly, so a backoff has to be readable from storage rather than held by
+ * whichever page happened to trigger it.
+ */
+describe('backoff is visible to a freshly opened lock window', () => {
+  test('reports no wait before any failure', async () => {
+    assert.equal(await engine.backoffRemainingMs(), 0);
+  });
+
+  test('reports the remaining wait after the free attempts are spent', async () => {
+    openTypicalWindow();
+    await engine.lock('manual');
+    for (let i = 0; i < 4; i++) await engine.unlock('wrong');
+
+    const remaining = await engine.backoffRemainingMs();
+    assert.ok(remaining > 0 && remaining <= 2000, `expected a short wait, got ${remaining}`);
+  });
+
+  test('survives a worker restart, because it is a timestamp on disk', async () => {
+    openTypicalWindow();
+    await engine.lock('manual');
+    for (let i = 0; i < 4; i++) await engine.unlock('wrong');
+    const disk = fake.dumpStorage();
+
+    const restarted = createFakeChrome();
+    globalThis.chrome = restarted.chrome;
+    restarted.loadStorage(disk);
+
+    assert.ok(await engine.backoffRemainingMs() > 0);
+  });
+});

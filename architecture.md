@@ -62,6 +62,15 @@ options.html / options.js     password setup and change, triggers, escrow status
 ui.css                        shared styling for the extension pages
 ```
 
+**No page touches `crypto.subtle` or storage.** Every one of them is a form plus
+`chrome.runtime.sendMessage`, and the worker is the only thing that reads a bundle or
+derives a key. That is what keeps `crypto.js` to a single caller and keeps the sender
+check in §9.1 the one place authorization is decided.
+
+The options page saves each setting as it is changed and re-renders from the worker's
+response rather than from its own controls, because `settings.js` clamps and coerces —
+so what the page shows is always what is actually stored.
+
 There is no separate `escrow.js`: escrow turned out to be the same key-bundle mechanism
 as the profile's own password (§4), so it is `crypto.js` plus one managed-storage read in
 `storage.js`.
@@ -224,6 +233,12 @@ what that error carries.
 Every trigger checks dormancy first, the shortcut included: on a profile with no password
 the hotkey does nothing and says nothing.
 
+**Idle locking is on by default, at ten minutes; startup locking is off.** That asymmetry
+rests on dormancy: the defaults only ever describe a profile whose owner deliberately set
+a password, and someone who does that wants the walk-away case covered — a lock that only
+fires when you remember to ask for it is the one that isn't there when it matters. Startup
+locking is the one trigger that can fire before you have done anything, so it stays opt-in.
+
 `chrome.idle`'s detection threshold is per *worker lifetime*, not persisted, and reverts
 to Chrome's 60 s default whenever the worker is torn down — which under MV3 is constantly.
 So `idle.setDetectionInterval` is called at the top level of the service worker on every
@@ -256,6 +271,18 @@ is not worth losing tabs over.
 Exponential backoff, never anything destructive: 3 free attempts, then
 `min(2^(n-3) s, 5 min)`, persisted with a timestamp so restarting Chrome doesn't reset
 it. Applies to master-password attempts too, per profile.
+
+Because it is only ever a wait, it is shown as one: the lock screen runs a live
+countdown and re-enables itself when it expires. The countdown is derived from the
+stored timestamp rather than owned by the page, so a lock window that protection mode
+just recreated — or one reopened after the worker was torn down — resumes the wait
+instead of offering a form whose next submission would be refused. It reads the clock
+each tick rather than counting ticks, so a throttled page lands on the right number.
+
+Password *changes* are not rate-limited. The options page is reachable only from an
+unlocked profile, where whoever is sitting there already has the session; and the
+bundle they'd be guessing against can be copied off disk and ground offline regardless,
+which is what the 600k iterations are for. A limit there would be theatre.
 
 Explicitly **not** BrowserLock's model, which wipes cookies, saved passwords, downloads
 and history after N wrong guesses — driven entirely by locally-editable state. That is a

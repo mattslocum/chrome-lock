@@ -394,7 +394,7 @@ per-profile and fine. Move to the policy install once the extension is stable.
 | ~~**1. Crypto core**~~ ✅ | `src/crypto.js`, `test/crypto.test.js`, `scripts/bench.js` | **Done.** 23 tests pass; 600k iterations measured at 644 ms; wrong password/master/tampering all raise `DecryptError`; password change rewraps without touching the ciphertext; escrow round-trips and rotation preserves existing wraps |
 | ~~**2. Lock engine**~~ ✅ | `manifest.json`, `service_worker.js`, `lock-engine.js`, `storage.js`, `settings.js`, lock + popup pages, `test/lock-engine.test.js` | **Done.** 43 tests pass. Manual lock closes everything and unlock restores; disable-resistance verified explicitly — after a lock, no captured URL appears anywhere in storage, and a fresh runtime given only that storage cannot open the snapshot, destroys nothing trying, and still yields the session to the correct password. Backoff enforced, protection mode self-heals across a simulated worker death. Note: the crypto design changed here — see §3 |
 | ~~**3. Fidelity + triggers**~~ ✅ | geometry, pinned, order, focus, tab groups; startup + idle + keyboard shortcut | **Done.** 49 tests pass. Groups restore with title, color and collapsed state, per window rather than merged; the window that had focus gets it back rather than the last one rebuilt; pinned tabs are never grouped (Chrome forbids it); a build without `chrome.tabGroups` still locks and restores. `commands` adds Cmd/Ctrl+Shift+L, dormant on an unconfigured profile; the idle threshold is reapplied on every worker start |
-| **4. UI + settings** | options page, password setup/change, backoff UI | Can set and change a password without ever seeing it in a `window.prompt` |
+| ~~**4. UI + settings**~~ ✅ | options page, password setup/change, backoff UI | **Done.** 67 tests pass. Password setup and change both live in real `type="password"` fields — no `window.prompt` anywhere. A change reseals the private key and is asserted to leave the ciphertext and the wrap byte-identical, so a session locked under the old password opens under the new one. Settings save as they are edited and the page renders what was *stored*, not what was clicked, because `settings.js` clamps untrusted input; the idle threshold is pushed to `chrome.idle` on change as well as on worker start. The lock screen shows a live countdown during backoff, resumed from storage so a recreated lock window or a restarted worker doesn't hand back a form that would just be refused |
 | **4b. Parent escrow** | keypair generation UI, `wrap_master`, "Parent unlock" on the lock screen, managed-storage read | Master password unlocks any profile including mine; the profile's own password still works afterward (no forced reset); escrow is visibly labeled |
 | **5. Hardening** | sender validation audit, storage-tamper review, CSP, error paths, multi-profile test | Every `onMessage` handler checks `sender.id === chrome.runtime.id`; SW crash while locked recovers to a locked state; two profiles with different passwords lock/unlock independently and a dormant third profile stays silent |
 | **6. Distribution** | pack CRX, host `update.xml`, write the managed-preferences plist incl. the escrow bundle | Survives a Chrome restart and a profile switch; cannot be disabled from `chrome://extensions`; child profiles pick up the escrow bundle from managed storage automatically |
@@ -426,9 +426,15 @@ per-profile and fine. Move to the policy install once the extension is stable.
 6. ~~Chrome Sync exposing tabs to other devices?~~ **Resolved: out of scope.** The
    threat is a kid on this machine opening another profile, not a remote signed-in
    device.
-3. Idle-lock default: on or off, and what delay? Suggest on at 10 min, matching
-   ChromeLock's `idleLockDelay: 600`, but that one defaults it off. **Phase 2 ships it
-   off at 600 s**, pending this decision — trigger and setting both exist.
+3. ~~Idle-lock default: on or off, and what delay?~~ **Resolved: on, at 600 s.** Dormancy
+   (§6) is what makes an on-by-default trigger safe — the defaults only ever describe a
+   profile whose owner deliberately set a password, and someone who does that wants the
+   walk-away case covered. Startup locking stays **off**: it is the one trigger that can
+   fire before you have done anything. Both are two clicks on the options page.
+
+   Note the interaction with §10.5: `chrome.idle` treats the macOS screen lock as
+   immediate, so this default makes screen-lock-triggered locking the common path — and
+   that path still has no automated coverage.
 4. ~~Should incognito windows be captured and restored?~~ **Resolved: closed and
    forgotten.** Capturing them into a record that outlives the session contradicts the
    point of incognito. Implemented in `captureSnapshot`.

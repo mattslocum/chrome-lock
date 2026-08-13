@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Chrome Lock — Settings</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body class="page">
+    <h1 class="page-title">Chrome Lock</h1>
+    <p class="page-subtitle">
+      Settings for this Chrome profile only. Every profile on this computer has its own
+      password and its own locked session.
+    </p>
+
+    <!-- Password ------------------------------------------------------------ -->
+
+    <section class="card">
+      <h2>Password</h2>
+
+      <!-- Dormant: no password has been set on this profile. -->
+      <div id="password-setup" hidden>
+        <p>
+          No password is set, so this extension currently does nothing on this profile: no
+          locking, no keyboard shortcut, no idle timer.
+        </p>
+        <form id="setup-form">
+          <label for="setup-new">New password</label>
+          <input type="password" id="setup-new" autocomplete="new-password" />
+          <label for="setup-confirm">Confirm password</label>
+          <input type="password" id="setup-confirm" autocomplete="new-password" />
+          <div class="row">
+            <button type="submit" id="setup-submit">Set password</button>
+          </div>
+          <div class="message" id="setup-message" role="alert"></div>
+        </form>
+      </div>
+
+      <!-- Configured: change it. -->
+      <div id="password-change" hidden>
+        <p>
+          Changing your password re-seals your key under the new one. Any session you have
+          locked right now stays locked and will open with the new password.
+        </p>
+        <form id="change-form">
+          <label for="change-old">Current password</label>
+          <input type="password" id="change-old" autocomplete="current-password" />
+          <label for="change-new">New password</label>
+          <input type="password" id="change-new" autocomplete="new-password" />
+          <label for="change-confirm">Confirm new password</label>
+          <input type="password" id="change-confirm" autocomplete="new-password" />
+          <div class="row">
+            <button type="submit" id="change-submit">Change password</button>
+          </div>
+          <div class="message" id="change-message" role="alert"></div>
+        </form>
+      </div>
+    </section>
+
+    <!-- Triggers ------------------------------------------------------------ -->
+
+    <section class="card" id="triggers" hidden>
+      <h2>When to lock</h2>
+
+      <label class="check">
+        <input type="checkbox" id="lock-on-startup" />
+        <span>Lock when Chrome starts</span>
+      </label>
+
+      <label class="check">
+        <input type="checkbox" id="lock-on-idle" />
+        <span>Lock when I stop using this computer</span>
+      </label>
+
+      <div class="indent">
+        <label for="idle-delay">After</label>
+        <select id="idle-delay">
+          <option value="60">1 minute</option>
+          <option value="300">5 minutes</option>
+          <option value="600">10 minutes</option>
+          <option value="900">15 minutes</option>
+          <option value="1800">30 minutes</option>
+          <option value="3600">1 hour</option>
+        </select>
+        <p class="hint">Locking the screen counts as idle straight away, whatever this says.</p>
+      </div>
+
+      <div class="row">
+        <span>Keyboard shortcut</span>
+        <code id="shortcut">not set</code>
+        <button type="button" class="secondary" id="edit-shortcut">Change</button>
+      </div>
+
+      <div class="message ok" id="settings-message" role="status"></div>
+    </section>
+
+    <!-- Parent unlock ------------------------------------------------------- -->
+
+    <section class="card">
+      <h2>Parent unlock</h2>
+      <p id="escrow-status">Checking…</p>
+    </section>
+
+    <!-- The honest limits --------------------------------------------------- -->
+
+    <section class="card">
+      <h2>What this does, and what it doesn't</h2>
+      <ul>
+        <li>Locking encrypts your open tabs and closes them. The list is never written to
+          disk unencrypted.</li>
+        <li>Turning the extension off does not bring your tabs back — nothing but your
+          password can decrypt them.</li>
+        <li>It does not stop anyone from using this profile once the extension is off. Your
+          history and saved passwords are not protected.</li>
+        <li>If you forget your password and no parent unlock is available, the locked tabs
+          are gone for good. Nothing else is lost.</li>
+      </ul>
+    </section>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

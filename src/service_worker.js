@@ -13,7 +13,7 @@
  */
 
 import * as engine from './lock-engine.js';
-import { getSettings } from './settings.js';
+import { getSettings, updateSettings } from './settings.js';
 import * as storage from './storage.js';
 
 const SWEEP_ALARM = 'lock-sweep';
@@ -122,6 +122,33 @@ const HANDLERS = {
   async setUpPassword({ password }) {
     await engine.setUpPassword(password);
     return { ok: true };
+  },
+
+  async changePassword({ oldPassword, newPassword }) {
+    await engine.changePassword(oldPassword, newPassword);
+    return { ok: true };
+  },
+
+  async getSettings() {
+    return { ok: true, settings: await getSettings() };
+  },
+
+  /**
+   * Returns what was actually stored, not what was asked for: settings.js clamps
+   * and coerces, so the options page renders the response rather than its own
+   * controls.
+   */
+  async updateSettings({ patch }) {
+    const settings = await updateSettings(patch ?? {});
+    // The idle threshold is per worker lifetime, so a changed delay has to be
+    // pushed to chrome.idle now — the next worker start reapplies it from here.
+    chrome.idle.setDetectionInterval(settings.idleDelaySeconds);
+    return { ok: true, settings };
+  },
+
+  /** Lets the lock window resume a countdown it did not start. */
+  async backoffStatus() {
+    return { ok: true, retryAfterMs: await engine.backoffRemainingMs() };
   },
 
   async lock() {

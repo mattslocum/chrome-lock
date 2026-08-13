@@ -1,4 +1,4 @@
-/* Shared styling for the lock window and the toolbar popup. */
+/* Shared styling for the lock window, the toolbar popup and the settings page. */
 
 :root {
   --bg: #ffffff;
@@ -93,9 +93,114 @@ button.secondary {
   color: var(--error);
 }
 
+/* A message that is news rather than a problem: saved, changed, working on it. */
+.message.ok {
+  color: var(--muted);
+}
+
 .center {
   display: flex;
   flex-direction: column;
   justify-content: center;
   min-height: calc(100vh - 40px);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* --- the settings page ---------------------------------------------------- */
+
+.page {
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+
+.page-title {
+  font-size: 20px;
+}
+
+.page-subtitle {
+  margin-bottom: 24px;
+}
+
+.card {
+  padding: 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.card ul {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+}
+
+.card li + li {
+  margin-top: 6px;
+}
+
+label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* A checkbox and its text read as one line, and the whole line is the target. */
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--fg);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.indent {
+  margin: 0 0 12px 24px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.hint {
+  margin: 6px 0 0;
+  font-size: 13px;
+}
+
+select {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+select:disabled {
+  opacity: 0.55;
+}
+
+code {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+/* Buttons sit inline in a .row; on their own they should not stretch a section. */
+.card button {
+  align-self: flex-start;
 }
