@@ -54,6 +54,15 @@ export function createFakeChrome() {
       getURL: (path) => `chrome-extension://fake-extension-id/${path}`,
     },
 
+    // Only what the message router touches: updateSettings pushes the new
+    // threshold straight through to chrome.idle.
+    idle: {
+      detectionIntervalSeconds: null,
+      setDetectionInterval(seconds) {
+        chrome.idle.detectionIntervalSeconds = seconds;
+      },
+    },
+
     storage: {
       local: storageArea(local),
       // Managed storage throws when no policy is configured, which is the normal

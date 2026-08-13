@@ -25,6 +25,8 @@
  *                  cannot write to, takes precedence — see getEscrowRecord.
  */
 
+import { looksLikeKeyBundle } from './crypto.js';
+
 const KEYS = {
   profileBundle: 'profileBundle',
   snapshot: 'snapshot',
@@ -49,6 +51,26 @@ async function get(key, fallback = null) {
   return result[key] ?? fallback;
 }
 
+/**
+ * Everything below treats what comes back from storage as untrusted input.
+ *
+ * Not because an attacker is expected — the threat model says otherwise — but
+ * because `chrome://extensions` and devtools can edit this store by hand, and a
+ * record that has been edited into the wrong *shape* should degrade to the
+ * default rather than throw somewhere far from here. Spreading a string over a
+ * defaults object, in particular, yields character-indexed keys rather than an
+ * error, which is the kind of thing that fails much later and looks like a bug
+ * in something else.
+ */
+function asObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+/** A finite number, or `fallback` for anything else — NaN and Infinity included. */
+function asNumber(value, fallback) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
 function set(key, value) {
   return chrome.storage.local.set({ [key]: value });
 }
@@ -64,7 +86,12 @@ export const setProfileBundle = (bundle) => set(KEYS.profileBundle, bundle);
  * must behave as though the extension is not installed — the dormancy rule.
  */
 export async function isConfigured() {
-  return (await getProfileBundle()) !== null;
+  // Shape-checked, not merely present: a profile whose bundle has been damaged
+  // can neither lock nor unlock, so reporting it as configured would leave it
+  // half-alive — arming triggers that can only fail — where dormancy leaves it
+  // exactly as it was before the extension arrived, and able to set a password
+  // again.
+  return looksLikeKeyBundle(await getProfileBundle());
 }
 
 // --- the parent escrow bundle -----------------------------------------------
@@ -86,12 +113,19 @@ export async function isConfigured() {
 export async function getEscrowRecord() {
   try {
     const managed = await chrome.storage.managed.get('escrowBundle');
-    if (managed?.escrowBundle) return { bundle: managed.escrowBundle, source: 'managed' };
+    // Shape-checked like everything else here. A malformed bundle in the plist —
+    // a truncated paste, most likely — must not shadow a working local one and
+    // must not be reported as an available recovery path.
+    if (looksLikeKeyBundle(managed?.escrowBundle)) {
+      return { bundle: managed.escrowBundle, source: 'managed' };
+    }
   } catch {
     // No managed policy is configured for this profile. Expected, not an error.
   }
   const local = await get(KEYS.escrowFallback);
-  return local ? { bundle: local, source: 'local' } : { bundle: null, source: null };
+  return looksLikeKeyBundle(local)
+    ? { bundle: local, source: 'local' }
+    : { bundle: null, source: null };
 }
 
 /** @returns {Promise<object|null>} */
@@ -120,7 +154,17 @@ export const clearSnapshotRecords = () =>
 
 /** @returns {Promise<{isLocked: boolean, lockedAt: number|null, reason: string|null, lockWindowId: number|null}>} */
 export async function getLockState() {
-  return { ...UNLOCKED, ...(await get(KEYS.lockState, {})) };
+  const stored = asObject(await get(KEYS.lockState, {}));
+  return {
+    ...UNLOCKED,
+    ...stored,
+    // Coerced rather than trusted: `isLocked` gates protection mode, and
+    // `lockWindowId` decides which window the reaper spares. A non-number there
+    // matches no window, so the reaper would close the lock window and the
+    // handler that recreates it would not recognise it either.
+    isLocked: stored.isLocked === true,
+    lockWindowId: asNumber(stored.lockWindowId, null),
+  };
 }
 
 export const setLockState = (state) => set(KEYS.lockState, state);
@@ -130,7 +174,11 @@ export const clearLockState = () => set(KEYS.lockState, { ...UNLOCKED });
 
 /** @returns {Promise<{failures: number, nextAttemptAt: number}>} */
 export async function getBackoff() {
-  return { failures: 0, nextAttemptAt: 0, ...(await get(KEYS.backoff, {})) };
+  const stored = asObject(await get(KEYS.backoff, {}));
+  return {
+    failures: Math.max(0, asNumber(stored.failures, 0)),
+    nextAttemptAt: asNumber(stored.nextAttemptAt, 0),
+  };
 }
 
 export const setBackoff = (state) => set(KEYS.backoff, state);
@@ -138,5 +186,5 @@ export const clearBackoff = () => chrome.storage.local.remove(KEYS.backoff);
 
 // --- settings ---------------------------------------------------------------
 
-export const getStoredSettings = () => get(KEYS.settings, {});
+export const getStoredSettings = async () => asObject(await get(KEYS.settings, {}));
 export const setStoredSettings = (settings) => set(KEYS.settings, settings);

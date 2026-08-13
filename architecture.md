@@ -31,14 +31,14 @@ What the design does and does not achieve:
 |---|---|
 | Blank the screen of open tabs when I walk away | ✅ |
 | Keep tabs unrecoverable if the extension is disabled | ✅ — §4 |
-| Keep profiles isolated from each other | ✅ — §6 |
-| Let a parent help a kid who forgot their password | ✅ — §7 |
-| Prevent someone *disabling* the extension | ⚠️ Only under enterprise policy — §8 |
+| Keep profiles isolated from each other | ✅ — §7 |
+| Let a parent help a kid who forgot their password | ✅ — §8 |
+| Prevent someone *disabling* the extension | ⚠️ Only under enterprise policy — §9 |
 | Prevent browsing a profile after disabling it | ❌ Not achievable by an extension |
 
 That last row is the standing limit. An extension cannot gate access to the profile
 itself; with a shared macOS login, anyone who disables it is in that profile with its
-history and saved passwords. Force-install (§8) makes disabling hard enough for this
+history and saved passwords. Force-install (§9) makes disabling hard enough for this
 threat model. Closing the gap properly means separate macOS accounts, deliberately
 deferred.
 
@@ -50,7 +50,8 @@ in plaintext on disk while claiming to protect it.
 ## 3. Components
 
 ```
-service_worker.js       orchestration, message router, lifecycle
+service_worker.js       listener registration and lifecycle
+  ├── messages.js       the message router, and the sender check that guards it
   ├── lock-engine.js    snapshot / close / restore / protection mode
   ├── crypto.js         PBKDF2, AES-GCM, RSA-OAEP — sole caller of crypto.subtle
   ├── storage.js        typed accessors over chrome.storage.local and .managed
@@ -80,10 +81,18 @@ Plain ES modules; `"type": "module"` service worker. No framework, no bundler,
 unminified. Target is comfortably under 1000 lines total — the reference point being
 ChromeLock, which ships ~9 MB for roughly 50 KB of real logic.
 
+**Content Security Policy:** the manifest pins `extension_pages` to
+`script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self';
+connect-src 'none'; form-action 'none'; base-uri 'none'`. Every page already
+loads one external module and no inline script, so this costs nothing and makes
+the invariants enforceable rather than merely observed: `connect-src 'none'` is
+invariant §6 (no network calls, ever) expressed where the browser can refuse it,
+and it covers the service worker as well as the pages.
+
 **Permissions:** `storage`, `tabs`, `tabGroups`, `idle`, `alarms`. No `host_permissions`,
 no `content_scripts`. There is deliberately no `"windows"` entry — no such permission
 exists; `chrome.windows` is always available and `tabs` is what exposes tab URLs through
-it. `chrome.storage.managed` (§7) needs no separate permission, and `commands` is a
+it. `chrome.storage.managed` (§8) needs no separate permission, and `commands` is a
 manifest key rather than a permission. `"incognito": "split"`; `"minimum_chrome_version"`
 pinned.
 
@@ -114,14 +123,14 @@ bundle      = {v, keyId, pub, privWrapped, salt, iterations}
 dataKey     = getRandomValues(32)
 ciphertext  = AES-GCM(dataKey, iv, JSON(snapshot))
 wrap_pw     = RSA-OAEP(profileBundle.pub, dataKey)     {v, keyId, ct}
-wrap_master = RSA-OAEP(escrowBundle.pub,  dataKey)     {v, keyId, ct}  — §7
+wrap_master = RSA-OAEP(escrowBundle.pub,  dataKey)     {v, keyId, ct}  — §8
 ```
 
 **Why asymmetric even for the profile's own password.** An earlier draft wrapped the
 data key symmetrically, under PBKDF2 of the password. That cannot work: locking has to
 *encrypt* the snapshot, and the startup and idle triggers fire with nobody present to
 type anything. A symmetric wrap would force the extension to hold the key while locked —
-destroying the one property this design exists for. §7 had already identified exactly
+destroying the one property this design exists for. §8 had already identified exactly
 this constraint for the parent escrow; it applies to the profile's own password too, and
 the answer is the same. So the two unlock paths are now structurally identical, and one
 tested primitive serves both.
@@ -247,6 +256,17 @@ start, not once at install. It is safe to apply unconditionally: the threshold o
 governs when `onStateChanged` fires, and that handler still checks dormancy and the
 `lockOnIdle` setting before locking anything.
 
+### Resuming across a browser restart
+
+`runtime.onStartup` on a profile that was locked calls `resumeLock`, not `sweep`.
+The difference matters: **window ids come from a counter that restarts with the
+browser**, so the `lockWindowId` written before Chrome closed very likely names
+one of the windows Chrome has just restored from the previous session. A bare
+sweep would spare that window as though it were the lock window, close everything
+else, and leave the profile sitting on its own tabs with no prompt in front of
+them. `resumeLock` drops the stale id first, so the sweep builds a real lock
+window.
+
 ### Restore fidelity
 
 Windows come back with their geometry, or with their window state where Chrome refuses
@@ -289,7 +309,39 @@ Explicitly **not** BrowserLock's model, which wipes cookies, saved passwords, do
 and history after N wrong guesses — driven entirely by locally-editable state. That is a
 footgun aimed at the user, not a security feature.
 
-## 6. Multi-profile model
+## 6. Storage is untrusted input
+
+Everything in `chrome.storage.local` can be edited by hand from devtools, and
+`chrome.storage.managed` can receive a truncated paste from the plist. So every
+accessor in `storage.js` shape-checks what it reads and falls back to the default
+rather than handing the wrong type onwards. Not because an attacker is expected —
+the threat model says otherwise — but because a record of the wrong shape
+otherwise fails somewhere far away and looks like a bug in something else.
+Specifically:
+
+- A damaged `profileBundle` makes the profile **dormant** rather than
+  half-configured: a profile that can neither lock nor unlock should look exactly
+  as it did before the extension arrived, not arm triggers that can only fail.
+- `isLocked` is coerced to a boolean and `lockWindowId` to a number or null,
+  because those two decide whether protection mode runs and which window it
+  spares. A string id matches no window, so the reaper would close the lock window
+  and not recognise it as missing either.
+- The backoff deadline is clamped to the same five-minute ceiling the policy can
+  reach. Nothing this code writes can exceed it, so a larger value is an edited
+  record or a clock jump, and neither may hold someone out of their own tabs for
+  longer than intended.
+- A malformed escrow bundle is not reported as an available recovery path, and a
+  malformed *managed* one does not shadow a working local bundle — the precedence
+  rule in §7 exists to stop a child substituting their own key, not to let a
+  truncated plist entry silently remove escrow from every profile.
+- Malformed base64 in any stored record surfaces as `DecryptError`, the same as a
+  wrong password, rather than as `atob`'s exception from inside the unlock path.
+- A snapshot whose decrypted contents are the wrong shape restores what it can,
+  window by window. The ciphertext is authenticated so this needs a format
+  change to happen at all — but a restore that throws halfway would leave neither
+  tabs nor a lock window, which is the one outcome worth ruling out.
+
+## 7. Multi-profile model
 
 `chrome.storage.local` is scoped per Chrome profile. The binary is shared across every
 profile on the machine; all state — salts, verifier, wraps, ciphertext, settings, backoff
@@ -300,7 +352,7 @@ counters — is per-profile.
   storage isolation, not something we implement — but we must not undermine it, which is
   one more reason nothing goes in `storage.sync` (which is keyed to the *Google account*,
   potentially shared across profiles).
-- The single deliberate exception is the master password (§7).
+- The single deliberate exception is the master password (§8).
 
 ### Dormant until configured
 
@@ -313,7 +365,7 @@ one "Set up a password" affordance. Ignoring it costs a dormant profile nothing.
 remote-configured `tutorialUrl` and nags for a review after 5 locks. We open nothing,
 ever.)
 
-## 7. Parent escrow
+## 8. Parent escrow
 
 **Goal:** one master password that can unlock any profile, so a kid who forgets theirs
 isn't stranded and doesn't have to share their password with me.
@@ -408,7 +460,7 @@ recovery key, no security questions (ChromeLock MD5s the answer), no email OTP
 (BrowserLock — reduces the lock to the strength of a mailbox), no timed auto-reset
 (ChromeLock, on by default — an unauthenticated bypass by design).
 
-## 8. Installation
+## 9. Installation
 
 Chrome enterprise policy on macOS applies to **all Chrome profiles for a macOS user**,
 and force-installed extensions **cannot be disabled or removed** from
@@ -418,7 +470,7 @@ and force-installed extensions **cannot be disabled or removed** from
 - Per macOS user: `/Library/Managed Preferences/<username>/com.google.Chrome.plist`
 
 With one shared login, either installs for every profile — acceptable, and desirable,
-since dormancy (§6) means profiles that never set a password are unaffected. The social
+since dormancy (§7) means profiles that never set a password are unaffected. The social
 cost is that family members can't remove it either; that warrants a heads-up rather than
 a surprise.
 
@@ -426,19 +478,25 @@ Requires a packed `.crx` and a hosted `update.xml`. That is the project's only n
 dependency, and it is install-time infrastructure, not runtime. Development uses
 unpacked loading, which is per-profile.
 
-## 9. Invariants
+## 10. Invariants
 
-1. Every `runtime.onMessage` handler validates `sender.id === chrome.runtime.id` and
-   returns early otherwise. GoogleChromeProfileLock's `unlockProfile` took no password
-   and validated no sender; BrowserLock accepts an unauthenticated `{type:"unlock"}`.
-   Same bug, twice.
+1. Every message is validated as coming from us — `sender.id === chrome.runtime.id`,
+   plus the sender's url where it has one — before any handler runs, and a refused
+   message is answered by nobody rather than with an error. There is exactly one
+   entry point, `routeMessage` in `messages.js`, which is what makes this testable
+   rather than a rule each handler has to remember. The handler table has a null
+   prototype, so `{type:"constructor"}` finds nothing instead of finding a function
+   off `Object.prototype`. GoogleChromeProfileLock's `unlockProfile` took no
+   password and validated no sender; BrowserLock accepts an unauthenticated
+   `{type:"unlock"}`. Same bug, twice.
 2. No `innerHTML`. `textContent` and DOM construction only.
 3. Nothing sensitive in `storage.sync`.
 4. No `console.log` in shipped code.
 5. No dead state and no placeholder URLs. (BrowserLock writes
    `open_after: ["https://x.com"]` on every lock and never reads it.)
-6. No network calls at runtime, ever. No telemetry, no remote config, no ads on the lock
-   screen.
+6. No network calls at runtime, ever. No telemetry, no remote config, no ads on the
+   lock screen — and `connect-src 'none'` in the CSP (§3) so the browser enforces it
+   rather than the reader having to.
 7. Every file readable top-to-bottom in one sitting. If a bundler ever becomes
    necessary, unminified source ships alongside.
 8. Once stable: tag it, keep the CRX, and never auto-update from anything I don't

@@ -21,6 +21,7 @@ import {
   decryptSnapshot,
   encryptSnapshot,
   generateDataKey,
+  looksLikeKeyBundle,
   unwrapWithBundle,
   validateKeyBundle,
   wipe,
@@ -79,7 +80,7 @@ export async function setUpPassword(password) {
  */
 export async function changePassword(oldPassword, newPassword) {
   const bundle = await storage.getProfileBundle();
-  if (!bundle) throw new LockError('No password is set for this profile');
+  if (!looksLikeKeyBundle(bundle)) throw new LockError('No password is set for this profile');
   if (typeof newPassword !== 'string' || newPassword.length < 8) {
     throw new LockError('Password must be at least 8 characters');
   }
@@ -227,7 +228,9 @@ async function assertEscrowEditable() {
  */
 export async function lock(reason = 'manual') {
   const bundle = await storage.getProfileBundle();
-  if (!bundle) throw new LockError('No password is set for this profile');
+  // Checked before anything is captured or closed, not at the moment of
+  // wrapping: a lock that fails halfway would have already taken the tabs away.
+  if (!looksLikeKeyBundle(bundle)) throw new LockError('No password is set for this profile');
   if ((await storage.getLockState()).isLocked) return;
 
   const snapshot = await captureSnapshot();
@@ -349,21 +352,24 @@ export async function unlock(password, via = 'password') {
     return { ok: false, error: 'Too many attempts. Try again shortly.', retryAfterMs: wait };
   }
 
-  let dataKey;
+  // Unwrapping the key and decrypting the snapshot are one step as far as the
+  // caller is concerned: both fail with DecryptError, and both mean "this did
+  // not open". Only the first is a wrong password, but the second — a truncated
+  // or edited ciphertext — must not throw past here either, or the lock screen
+  // gets an exception where it expects a refusal.
+  let snapshot;
   try {
-    dataKey = await recoverDataKey(password, via);
+    const dataKey = await recoverDataKey(password, via);
+    try {
+      const blob = await storage.getSnapshot();
+      snapshot = blob ? await decryptSnapshot(dataKey, blob) : { windows: [] };
+    } finally {
+      wipe(dataKey);
+    }
   } catch (error) {
     if (!(error instanceof DecryptError)) throw error;
     const retryAfterMs = await recordFailure();
     return { ok: false, error: error.message, retryAfterMs };
-  }
-
-  let snapshot;
-  try {
-    const blob = await storage.getSnapshot();
-    snapshot = blob ? await decryptSnapshot(dataKey, blob) : { windows: [] };
-  } finally {
-    wipe(dataKey);
   }
 
   await storage.clearBackoff();
@@ -400,8 +406,13 @@ async function restore(snapshot, lockWindowId) {
     // new window regardless), so without a final pass the last one restored
     // would always end up on top rather than the one that was.
     let focusWindowId = null;
-    for (const win of snapshot.windows ?? []) {
-      const createdId = await restoreWindow(win);
+    // The snapshot is authenticated, so this list is what we wrote — but it has
+    // been through JSON and a format version, and a restore that throws halfway
+    // strands the user with neither their tabs nor a lock window. Each window is
+    // therefore taken on its own: one bad record costs that window, not the
+    // session.
+    for (const win of asArray(snapshot?.windows)) {
+      const createdId = await restoreWindow(win).catch(() => null);
       if (createdId != null && (win.focused || focusWindowId === null)) focusWindowId = createdId;
     }
     if (focusWindowId != null) {
@@ -428,8 +439,15 @@ async function restore(snapshot, lockWindowId) {
  * @returns {Promise<number|null>} the new window's id
  */
 async function restoreWindow(win) {
-  const urls = (win.tabs ?? []).map((tab) => tab.url).filter(Boolean);
-  if (urls.length === 0) return null;
+  // Tabs without a usable url are dropped *before* the urls are taken, not
+  // after: every step below pairs the i-th created tab with the i-th source
+  // record, so a filter applied to only one of the two lists would silently
+  // shift pinning, focus and group membership onto the wrong tabs.
+  const sourceTabs = asArray(win?.tabs).filter(
+    (tab) => typeof tab?.url === 'string' && tab.url !== '',
+  );
+  if (sourceTabs.length === 0) return null;
+  const urls = sourceTabs.map((tab) => tab.url);
 
   // Chrome rejects geometry combined with a non-normal state, so it is one or
   // the other.
@@ -441,7 +459,7 @@ async function restoreWindow(win) {
   const tabs = created?.tabs ?? [];
 
   for (let i = 0; i < tabs.length; i++) {
-    const source = win.tabs[i];
+    const source = sourceTabs[i];
     if (!source) continue;
     const update = {};
     if (source.pinned) update.pinned = true;
@@ -451,7 +469,7 @@ async function restoreWindow(win) {
     }
   }
 
-  await restoreGroups(win, created?.id, tabs);
+  await restoreGroups(win, created?.id, tabs, sourceTabs);
   return created?.id ?? null;
 }
 
@@ -461,13 +479,13 @@ async function restoreWindow(win) {
  * still a restored window, and losing a group label is not worth losing tabs
  * over.
  */
-async function restoreGroups(win, windowId, tabs) {
+async function restoreGroups(win, windowId, tabs, sourceTabs) {
   if (!chrome.tabGroups || windowId == null) return;
 
   // group index -> the new tab ids that belonged to it
   const members = new Map();
   for (let i = 0; i < tabs.length; i++) {
-    const source = win.tabs[i];
+    const source = sourceTabs[i];
     // Pinned tabs cannot be grouped; Chrome would have dropped them from the
     // group on capture anyway, but storage is locally editable so check here.
     if (!source || source.group == null || source.pinned) continue;
@@ -476,7 +494,7 @@ async function restoreGroups(win, windowId, tabs) {
   }
 
   for (const [index, tabIds] of members) {
-    const group = win.groups?.[index];
+    const group = asArray(win?.groups)[index];
     if (!group) continue;
     try {
       const groupId = await chrome.tabs.group({ tabIds, createProperties: { windowId } });
@@ -553,6 +571,25 @@ export async function sweep() {
   await closeEverythingExceptLockWindow(state.lockWindowId);
 }
 
+/**
+ * Re-establish a lock across a browser restart.
+ *
+ * A sweep is not enough on its own. Window ids come from a counter that starts
+ * over with the browser, so the `lockWindowId` written before Chrome closed very
+ * likely names one of the windows Chrome has just restored from the previous
+ * session — and the sweep would then spare that window as the lock window, close
+ * everything else, and leave the profile sitting on its own tabs with no
+ * password prompt in front of them.
+ *
+ * So the stale id is dropped first, and the sweep builds a real lock window.
+ */
+export async function resumeLock() {
+  const state = await storage.getLockState();
+  if (!state.isLocked) return;
+  await storage.setLockState({ ...state, lockWindowId: null });
+  await sweep();
+}
+
 async function closeEverythingExceptLockWindow(lockWindowId) {
   const windows = await chrome.windows.getAll();
   for (const win of windows) {
@@ -591,7 +628,11 @@ function removeWindow(windowId) {
  */
 export async function backoffRemainingMs() {
   const { nextAttemptAt } = await storage.getBackoff();
-  return Math.max(0, nextAttemptAt - Date.now());
+  // Clamped to the same ceiling the backoff itself can reach. Nothing this code
+  // writes can exceed it, so a larger value means an edited record or a clock
+  // that jumped — neither of which should be able to hold someone out of their
+  // own tabs for longer than the policy ever intends.
+  return Math.min(Math.max(0, nextAttemptAt - Date.now()), MAX_BACKOFF_MS);
 }
 
 /**
@@ -606,6 +647,11 @@ async function recordFailure() {
     next <= FREE_ATTEMPTS ? 0 : Math.min(2 ** (next - FREE_ATTEMPTS) * 1000, MAX_BACKOFF_MS);
   await storage.setBackoff({ failures: next, nextAttemptAt: Date.now() + delay });
   return delay;
+}
+
+/** Storage and JSON both survive being edited into the wrong type; iteration does not. */
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

@@ -13,7 +13,8 @@
  */
 
 import * as engine from './lock-engine.js';
-import { getSettings, updateSettings } from './settings.js';
+import { routeMessage } from './messages.js';
+import { getSettings } from './settings.js';
 import * as storage from './storage.js';
 
 const SWEEP_ALARM = 'lock-sweep';
@@ -58,9 +59,10 @@ chrome.runtime.onStartup.addListener(async () => {
 
   // A lock that was in effect when Chrome closed is still in effect now: Chrome
   // restores the previous session on its own, so without this the tabs would
-  // simply come back.
+  // simply come back. `resumeLock` rather than `sweep` because the recorded lock
+  // window belongs to the session that just ended.
   if ((await storage.getLockState()).isLocked) {
-    await engine.sweep();
+    await engine.resumeLock();
     return;
   }
   if ((await getSettings()).lockOnStartup) await engine.lock('startup');
@@ -105,90 +107,7 @@ async function applyIdleDetectionInterval() {
 }
 
 // --- message router ---------------------------------------------------------
+// The handlers, and the sender check that guards them, live in messages.js so
+// that invariant §9.1 can be tested rather than merely asserted in a comment.
 
-/**
- * Handlers for messages from our own pages. Each returns a plain object that is
- * sent back to the caller.
- */
-const HANDLERS = {
-  async status() {
-    return {
-      configured: await storage.isConfigured(),
-      lockState: await storage.getLockState(),
-      escrow: await engine.getEscrowStatus(),
-    };
-  },
-
-  /** Mint an escrow key. The bundle comes back so it can be copied to the plist. */
-  async createEscrow({ masterPassword }) {
-    return { ok: true, bundle: await engine.createEscrow(masterPassword) };
-  },
-
-  async importEscrow({ bundle }) {
-    return { ok: true, bundle: await engine.importEscrow(bundle) };
-  },
-
-  async removeEscrow() {
-    await engine.removeEscrow();
-    return { ok: true };
-  },
-
-  async changeMasterPassword({ oldPassword, newPassword }) {
-    return { ok: true, bundle: await engine.changeMasterPassword(oldPassword, newPassword) };
-  },
-
-  async setUpPassword({ password }) {
-    await engine.setUpPassword(password);
-    return { ok: true };
-  },
-
-  async changePassword({ oldPassword, newPassword }) {
-    await engine.changePassword(oldPassword, newPassword);
-    return { ok: true };
-  },
-
-  async getSettings() {
-    return { ok: true, settings: await getSettings() };
-  },
-
-  /**
-   * Returns what was actually stored, not what was asked for: settings.js clamps
-   * and coerces, so the options page renders the response rather than its own
-   * controls.
-   */
-  async updateSettings({ patch }) {
-    const settings = await updateSettings(patch ?? {});
-    // The idle threshold is per worker lifetime, so a changed delay has to be
-    // pushed to chrome.idle now — the next worker start reapplies it from here.
-    chrome.idle.setDetectionInterval(settings.idleDelaySeconds);
-    return { ok: true, settings };
-  },
-
-  /** Lets the lock window resume a countdown it did not start. */
-  async backoffStatus() {
-    return { ok: true, retryAfterMs: await engine.backoffRemainingMs() };
-  },
-
-  async lock() {
-    await engine.lock('manual');
-    return { ok: true };
-  },
-
-  async unlock({ password, via }) {
-    return engine.unlock(password, via === 'master' ? 'master' : 'password');
-  },
-};
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // The one check that all three reference extensions omitted, twice over:
-  // without it, any web page could post {type:"unlock"} at us.
-  if (sender.id !== chrome.runtime.id) return false;
-
-  const handler = HANDLERS[message?.type];
-  if (!handler) return false;
-
-  handler(message ?? {})
-    .then(sendResponse)
-    .catch((error) => sendResponse({ ok: false, error: error.message }));
-  return true; // response is async
-});
+chrome.runtime.onMessage.addListener(routeMessage);

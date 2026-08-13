@@ -50,9 +50,23 @@ export function toB64(bytes) {
   return btoa(binary);
 }
 
-/** @param {string} b64 @returns {Uint8Array} */
+/**
+ * Every caller of this decodes a field out of a stored record, and storage is
+ * locally editable — so malformed base64 is not a programming error, it is a
+ * tampered or truncated record. Raising `DecryptError` puts it on the same
+ * footing as a wrong password, which is the only way the callers can report it
+ * to a user anyway, and keeps `atob`'s DOM exception out of the unlock path.
+ *
+ * @param {string} b64 @returns {Uint8Array}
+ * @throws {DecryptError} on anything that is not base64
+ */
 export function fromB64(b64) {
-  const binary = atob(b64);
+  let binary;
+  try {
+    binary = atob(b64);
+  } catch {
+    throw new DecryptError('Malformed record');
+  }
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
@@ -160,6 +174,32 @@ export async function wrapToBundle(bundle, dataKey) {
 }
 
 /**
+ * Whether `bundle` has the shape of a key bundle: every field present, of the
+ * right type, before anything tries to use one.
+ *
+ * Synchronous and cheap, because two callers need an answer without doing
+ * crypto — `isConfigured`, which decides dormancy on every trigger, and the
+ * unwrap path, which would otherwise dereference its way into a TypeError on a
+ * record somebody edited. Says nothing about whether the key *works*; that is
+ * `validateKeyBundle`.
+ *
+ * @param {unknown} bundle
+ * @returns {boolean}
+ */
+export function looksLikeKeyBundle(bundle) {
+  if (!bundle || typeof bundle !== 'object') return false;
+  const { v, keyId, pub, privWrapped, salt, iterations } = bundle;
+  if (v !== FORMAT_VERSION) return false;
+  if (typeof keyId !== 'string' || typeof pub !== 'string' || typeof salt !== 'string') {
+    return false;
+  }
+  if (!Number.isInteger(iterations) || iterations < 1) return false;
+  return Boolean(
+    privWrapped && typeof privWrapped.iv === 'string' && typeof privWrapped.ct === 'string',
+  );
+}
+
+/**
  * Whether `bundle` is a usable key bundle.
  *
  * Structural checks are not enough: an escrow bundle can arrive by being pasted
@@ -175,16 +215,7 @@ export async function wrapToBundle(bundle, dataKey) {
  * @returns {Promise<boolean>}
  */
 export async function validateKeyBundle(bundle) {
-  if (!bundle || typeof bundle !== 'object') return false;
-  const { v, keyId, pub, privWrapped, salt, iterations } = bundle;
-  if (v !== FORMAT_VERSION) return false;
-  if (typeof keyId !== 'string' || typeof pub !== 'string' || typeof salt !== 'string') {
-    return false;
-  }
-  if (!Number.isInteger(iterations) || iterations < 1) return false;
-  if (!privWrapped || typeof privWrapped.iv !== 'string' || typeof privWrapped.ct !== 'string') {
-    return false;
-  }
+  if (!looksLikeKeyBundle(bundle)) return false;
   try {
     await wrapToBundle(bundle, generateDataKey());
     return true;
@@ -269,6 +300,10 @@ async function sealBundle(pkcs8, spki, password, iterations) {
 
 async function unwrapPrivateKey(password, bundle) {
   assertVersion(bundle);
+  // A bundle read back off disk may have been edited into any shape at all, and
+  // reaching into a missing `privWrapped` would throw a TypeError past every
+  // caller that is only prepared for a wrong password.
+  if (!looksLikeKeyBundle(bundle)) throw new DecryptError('Malformed key bundle');
   const kek = await deriveKek(password, fromB64(bundle.salt), bundle.iterations);
   let pkcs8;
   try {

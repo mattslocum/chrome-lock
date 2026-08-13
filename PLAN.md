@@ -415,13 +415,31 @@ per-profile and fine. Move to the policy install once the extension is stable.
 | ~~**3. Fidelity + triggers**~~ ✅ | geometry, pinned, order, focus, tab groups; startup + idle + keyboard shortcut | **Done.** 49 tests pass. Groups restore with title, color and collapsed state, per window rather than merged; the window that had focus gets it back rather than the last one rebuilt; pinned tabs are never grouped (Chrome forbids it); a build without `chrome.tabGroups` still locks and restores. `commands` adds Cmd/Ctrl+Shift+L, dormant on an unconfigured profile; the idle threshold is reapplied on every worker start |
 | ~~**4. UI + settings**~~ ✅ | options page, password setup/change, backoff UI | **Done.** 67 tests pass. Password setup and change both live in real `type="password"` fields — no `window.prompt` anywhere. A change reseals the private key and is asserted to leave the ciphertext and the wrap byte-identical, so a session locked under the old password opens under the new one. Settings save as they are edited and the page renders what was *stored*, not what was clicked, because `settings.js` clamps untrusted input; the idle threshold is pushed to `chrome.idle` on change as well as on worker start. The lock screen shows a live countdown during backoff, resumed from storage so a recreated lock window or a restarted worker doesn't hand back a form that would just be refused |
 | ~~**4b. Parent escrow**~~ ✅ | keypair generation UI, `wrap_master`, "Parent unlock" on the lock screen, managed-storage read | **Done.** 81 tests pass. A master unlock restores the session and is asserted to leave the profile bundle byte-identical, so the owner's password keeps working; backoff covers the parent path, so it is not a way around a wait. The lock screen offers "Parent unlock" only when a `wrap_master` actually exists for *this* session — a session locked before escrow was set up cannot be opened by it, and advertising the option would be a lie. A managed bundle beats a locally installed one, so a child cannot shadow the parent's key with one whose password they chose, and under policy the profile cannot create, import, rotate or remove. `managed-schema.json` is what makes the plist path work at all: Chrome reads no managed key that is not declared. Two corrections found here — see §6 |
-| **5. Hardening** | sender validation audit, storage-tamper review, CSP, error paths, multi-profile test | Every `onMessage` handler checks `sender.id === chrome.runtime.id`; SW crash while locked recovers to a locked state; two profiles with different passwords lock/unlock independently and a dormant third profile stays silent |
+| ~~**5. Hardening**~~ ✅ | `src/messages.js`, storage-tamper review, CSP, error paths, `test/hardening.test.js` | **Done.** 102 tests pass. The router moved out of the service worker so the sender check is one testable entry point rather than a rule per handler, and the handler table got a null prototype so `{type:"constructor"}` finds nothing. Storage is now read as untrusted input throughout: a damaged profile bundle makes the profile dormant rather than half-configured, `isLocked`/`lockWindowId` are coerced, the backoff deadline is clamped to the policy ceiling, a malformed managed bundle no longer shadows a working local one, and malformed base64 surfaces as `DecryptError` like any other failed unwrap. CSP pins `script-src 'self'` and `connect-src 'none'`, which is the no-network invariant made enforceable. Two profiles lock and unlock independently with neither password opening the other and neither backoff touching the other, while a dormant third writes nothing at all. Two real bugs found here — see below |
 | **6. Distribution** | pack CRX, host `update.xml`, write the managed-preferences plist incl. the escrow bundle | Survives a Chrome restart and a profile switch; cannot be disabled from `chrome://extensions`; child profiles pick up the escrow bundle from managed storage automatically |
+
+### Two bugs Phase 5 found
+
+1. **A lock did not survive a browser restart the way it looked like it did.**
+   `runtime.onStartup` swept with the `lockWindowId` written before Chrome closed —
+   but window ids come from a counter that restarts with the browser, so that id
+   very likely names one of the windows Chrome has just restored from the previous
+   session. The sweep would spare it as the lock window, close everything else, and
+   leave the profile sitting on its own tabs with no prompt in front of them. Now
+   `resumeLock` drops the stale id first and the sweep builds a real lock window.
+   This is the worst-shaped bug in the project so far: it fails open, and only on
+   the path nobody watches.
+2. **A corrupt ciphertext threw out of `unlock` instead of being refused.** Only
+   the unwrap was inside the guard that turns `DecryptError` into a failed attempt;
+   the snapshot decrypt that follows it was not, so an edited or truncated record
+   reached the lock screen as an exception where it expects a refusal. Both steps
+   are now one guarded block — which is also what architecture.md already said the
+   UI must not distinguish.
 
 ## 9. Cross-cutting rules
 
 1. Every `chrome.runtime.onMessage` handler validates `sender.id === chrome.runtime.id`
-   and returns early otherwise. GoogleChromeProfileLock's `unlockProfile` took no
+   and returns early otherwise — enforced in one place, `messages.js`, and tested. GoogleChromeProfileLock's `unlockProfile` took no
    password and validated no sender; BrowserLock accepts an unauthenticated
    `{type:"unlock"}`. Both are the same bug.
 2. No `innerHTML` anywhere. `textContent` and DOM construction only.
