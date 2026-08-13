@@ -70,9 +70,12 @@ Plain ES modules; `"type": "module"` service worker. No framework, no bundler,
 unminified. Target is comfortably under 1000 lines total — the reference point being
 ChromeLock, which ships ~9 MB for roughly 50 KB of real logic.
 
-**Permissions:** `storage`, `tabs`, `windows`, `idle`, `alarms`. No `host_permissions`,
-no `content_scripts`. `chrome.storage.managed` (§7) needs no separate permission.
-`"incognito": "split"`; `"minimum_chrome_version"` pinned.
+**Permissions:** `storage`, `tabs`, `tabGroups`, `idle`, `alarms`. No `host_permissions`,
+no `content_scripts`. There is deliberately no `"windows"` entry — no such permission
+exists; `chrome.windows` is always available and `tabs` is what exposes tab URLs through
+it. `chrome.storage.managed` (§7) needs no separate permission, and `commands` is a
+manifest key rather than a permission. `"incognito": "split"`; `"minimum_chrome_version"`
+pinned.
 
 ## 4. Cryptographic design
 
@@ -214,9 +217,39 @@ what that error carries.
 
 | Trigger | Mechanism |
 |---|---|
-| Manual | toolbar popup, and a keyboard shortcut via `commands` |
+| Manual | toolbar popup, and `commands` — Cmd+Shift+L on macOS, Ctrl+Shift+L elsewhere |
 | Startup | `runtime.onStartup` |
 | Idle | `idle.onStateChanged`, including the `locked` state (macOS screen lock) |
+
+Every trigger checks dormancy first, the shortcut included: on a profile with no password
+the hotkey does nothing and says nothing.
+
+`chrome.idle`'s detection threshold is per *worker lifetime*, not persisted, and reverts
+to Chrome's 60 s default whenever the worker is torn down — which under MV3 is constantly.
+So `idle.setDetectionInterval` is called at the top level of the service worker on every
+start, not once at install. It is safe to apply unconditionally: the threshold only
+governs when `onStateChanged` fires, and that handler still checks dormancy and the
+`lockOnIdle` setting before locking anything.
+
+### Restore fidelity
+
+Windows come back with their geometry, or with their window state where Chrome refuses
+the two together (`maximized`, `fullscreen`, `minimized`). Tabs come back in order, with
+pinning and the active tab.
+
+**Focus is applied in a final pass.** Chrome focuses each window as it is created, so
+without one the last window rebuilt would always end up on top instead of the one that
+actually had focus.
+
+**Tab groups** are captured per window as `{title, color, collapsed}`, with each tab
+holding an *index* into that list rather than Chrome's group id — ids do not survive a
+restore, and an index is all the regrouping step needs. On restore the order is forced by
+Chrome's API: create, then pin, then group. Pinning moves a tab to the front of the strip
+and a pinned tab cannot belong to a group, so grouping has to come last.
+
+Grouping is best-effort throughout. A Chrome build without `chrome.tabGroups`, or a
+failing group call, yields an ungrouped but otherwise complete restore: a lost group label
+is not worth losing tabs over.
 
 ### Failed attempts
 

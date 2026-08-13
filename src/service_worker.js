@@ -18,6 +18,7 @@ import * as storage from './storage.js';
 
 const SWEEP_ALARM = 'lock-sweep';
 const SWEEP_PERIOD_MINUTES = 1; // the MV3 minimum
+const LOCK_COMMAND = 'lock-now';
 
 // --- protection mode listeners ----------------------------------------------
 
@@ -42,6 +43,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 // --- lifecycle --------------------------------------------------------------
+
+// Every worker start, not just install: the idle threshold is per worker
+// lifetime and reverts to Chrome's default when the worker is torn down.
+applyIdleDetectionInterval();
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureSweepAlarm();
@@ -71,11 +76,32 @@ chrome.idle.onStateChanged.addListener(async (state) => {
   if (settings.lockOnIdle) await engine.lock('idle');
 });
 
+// The keyboard shortcut. Dormancy applies: on a profile with no password this
+// does nothing, silently — no error, no prompt to set one up.
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command !== LOCK_COMMAND) return;
+  if (!(await storage.isConfigured())) return;
+  await engine.lock('manual');
+});
+
 async function ensureSweepAlarm() {
   const existing = await chrome.alarms.get(SWEEP_ALARM);
   if (!existing) {
     await chrome.alarms.create(SWEEP_ALARM, { periodInMinutes: SWEEP_PERIOD_MINUTES });
   }
+}
+
+/**
+ * `chrome.idle` fires `idle` after a threshold that is scoped to the worker's
+ * lifetime and reverts to Chrome's 60s default when the worker is torn down — so
+ * the configured delay is reapplied on every start, not set once at install.
+ * Doing it unconditionally is safe:
+ * the threshold only decides when `onStateChanged` fires, and that handler still
+ * checks dormancy and the trigger setting before locking anything.
+ */
+async function applyIdleDetectionInterval() {
+  const { idleDelaySeconds } = await getSettings();
+  chrome.idle.setDetectionInterval(idleDelaySeconds);
 }
 
 // --- message router ---------------------------------------------------------

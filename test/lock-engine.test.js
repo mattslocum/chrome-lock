@@ -209,6 +209,125 @@ describe('unlock', () => {
   });
 });
 
+/**
+ * Phase 3's bar: the restored session should be indistinguishable from the
+ * original. These cases each pin one dimension of that — geometry and window
+ * state, tab groups with their metadata, which window ends up focused, and the
+ * interaction between pinning and grouping that Chrome's API forces on us.
+ */
+describe('restore fidelity', () => {
+  test('restores tab groups with their titles, colors and collapsed state', async () => {
+    fake.openWindow({
+      tabs: [
+        { url: 'https://a.example/', group: 'work' },
+        { url: 'https://b.example/', group: 'work' },
+        { url: 'https://c.example/' },
+        { url: 'https://d.example/', group: 'reading' },
+      ],
+      groupSpecs: {
+        work: { color: 'blue', collapsed: false },
+        reading: { color: 'red', collapsed: true },
+      },
+    });
+
+    await engine.lock('manual');
+    await engine.unlock(PASSWORD);
+
+    const win = fake.listWindows()[0];
+    const groupOf = (url) => {
+      const tab = win.tabs.find((t) => t.url === url);
+      return fake.listGroups().find((g) => g.id === tab.groupId) ?? null;
+    };
+
+    const work = groupOf('https://a.example/');
+    assert.deepEqual(
+      { title: work.title, color: work.color, collapsed: work.collapsed },
+      { title: 'work', color: 'blue', collapsed: false },
+    );
+    assert.equal(groupOf('https://b.example/').id, work.id, 'both work tabs share one group');
+    assert.equal(groupOf('https://c.example/'), null, 'an ungrouped tab stays ungrouped');
+
+    const reading = groupOf('https://d.example/');
+    assert.notEqual(reading.id, work.id, 'separate groups stay separate');
+    assert.deepEqual(
+      { title: reading.title, color: reading.color, collapsed: reading.collapsed },
+      { title: 'reading', color: 'red', collapsed: true },
+    );
+  });
+
+  test('a group spanning two windows is rebuilt per window, not merged', async () => {
+    fake.openWindow({ tabs: [{ url: 'https://a.example/', group: 'left' }] });
+    fake.openWindow({ tabs: [{ url: 'https://b.example/', group: 'right' }] });
+
+    await engine.lock('manual');
+    await engine.unlock(PASSWORD);
+
+    const wins = fake.listWindows();
+    assert.equal(wins.length, 2);
+    const groupIds = wins.map((win) => win.tabs[0].groupId);
+    assert.notEqual(groupIds[0], groupIds[1]);
+    for (const [i, id] of groupIds.entries()) {
+      const group = fake.listGroups().find((g) => g.id === id);
+      assert.equal(group.windowId, wins[i].id, 'each group belongs to its own window');
+    }
+  });
+
+  test('pinned tabs are restored pinned and never grouped', async () => {
+    fake.openWindow({
+      tabs: [
+        { url: 'https://pinned.example/', pinned: true },
+        { url: 'https://grouped.example/', group: 'work' },
+      ],
+    });
+
+    await engine.lock('manual');
+    await engine.unlock(PASSWORD);
+
+    const win = fake.listWindows()[0];
+    const pinned = win.tabs.find((t) => t.url === 'https://pinned.example/');
+    assert.equal(pinned.pinned, true);
+    assert.equal(pinned.groupId, -1, 'Chrome forbids a pinned tab in a group');
+    assert.notEqual(win.tabs.find((t) => t.url === 'https://grouped.example/').groupId, -1);
+  });
+
+  test('restores the window that was focused, not merely the last one rebuilt', async () => {
+    fake.openWindow({ tabs: [{ url: 'https://focused.example/' }], focused: true });
+    fake.openWindow({ tabs: [{ url: 'https://background.example/' }] });
+
+    await engine.lock('manual');
+    await engine.unlock(PASSWORD);
+
+    const focused = fake.listWindows().filter((win) => win.focused);
+    assert.equal(focused.length, 1, 'exactly one window has focus');
+    assert.equal(focused[0].tabs[0].url, 'https://focused.example/');
+  });
+
+  test('restores a maximized window as maximized rather than at stale geometry', async () => {
+    fake.openWindow({ tabs: [{ url: 'https://a.example/' }], state: 'maximized' });
+
+    await engine.lock('manual');
+    await engine.unlock(PASSWORD);
+
+    assert.equal(fake.listWindows()[0].state, 'maximized');
+  });
+
+  test('locks and restores normally on a Chrome build with no tabGroups API', async () => {
+    fake.openWindow({ tabs: [{ url: 'https://a.example/', group: 'work' }] });
+    const tabGroups = fake.chrome.tabGroups;
+    delete fake.chrome.tabGroups;
+
+    try {
+      await engine.lock('manual');
+      assert.deepEqual(await engine.unlock(PASSWORD), { ok: true });
+    } finally {
+      fake.chrome.tabGroups = tabGroups;
+    }
+
+    const win = fake.listWindows()[0];
+    assert.equal(win.tabs[0].url, 'https://a.example/', 'tabs matter, groups are a bonus');
+  });
+});
+
 describe('protection mode', () => {
   test('closes any window that appears while locked', async () => {
     openTypicalWindow();

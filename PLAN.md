@@ -76,13 +76,24 @@ achievable, and it's what all three reference extensions got wrong.
 ## 2. Permissions
 
 ```json
-"permissions": ["storage", "tabs", "windows", "idle", "alarms"]
+"permissions": ["storage", "tabs", "tabGroups", "idle", "alarms"]
 ```
 
 No `host_permissions`. No `content_scripts`. No `notifications` (nothing needs to
-notify). No `unlimitedStorage`, `tabGroups` is folded into `tabs` for read;
-`chrome.tabGroups` needs the `tabGroups` permission for group metadata — add it only
-if we implement group name/color restore in Phase 3.
+notify). No `unlimitedStorage`.
+
+Two corrections found in Phase 3:
+
+- **There is no `"windows"` permission.** `chrome.windows` is available unconditionally,
+  and `tabs` is what grants access to tab URLs through it. Chrome warns about unknown
+  permission strings, so it was dropped rather than left as decoration.
+- **`tabGroups` was added**, as anticipated: reading a group's name, color and collapsed
+  state needs it, and Phase 3 restores all three. Group *membership* is visible via
+  `tab.groupId` under `tabs` alone, which is why the engine degrades to ungrouped
+  restore when the API is missing instead of failing.
+
+`commands` (the keyboard shortcut) is a manifest key, not a permission, and adds no
+prompt.
 
 `"minimum_chrome_version"` pinned. `"incognito": "split"` so incognito windows are
 handled explicitly rather than accidentally.
@@ -382,7 +393,7 @@ per-profile and fine. Move to the policy install once the extension is stable.
 |---|---|---|
 | ~~**1. Crypto core**~~ ✅ | `src/crypto.js`, `test/crypto.test.js`, `scripts/bench.js` | **Done.** 23 tests pass; 600k iterations measured at 644 ms; wrong password/master/tampering all raise `DecryptError`; password change rewraps without touching the ciphertext; escrow round-trips and rotation preserves existing wraps |
 | ~~**2. Lock engine**~~ ✅ | `manifest.json`, `service_worker.js`, `lock-engine.js`, `storage.js`, `settings.js`, lock + popup pages, `test/lock-engine.test.js` | **Done.** 43 tests pass. Manual lock closes everything and unlock restores; disable-resistance verified explicitly — after a lock, no captured URL appears anywhere in storage, and a fresh runtime given only that storage cannot open the snapshot, destroys nothing trying, and still yields the session to the correct password. Backoff enforced, protection mode self-heals across a simulated worker death. Note: the crypto design changed here — see §3 |
-| **3. Fidelity + triggers** | geometry, pinned, order, tab groups; startup + idle + keyboard shortcut | Restored session is visually indistinguishable from the original |
+| ~~**3. Fidelity + triggers**~~ ✅ | geometry, pinned, order, focus, tab groups; startup + idle + keyboard shortcut | **Done.** 49 tests pass. Groups restore with title, color and collapsed state, per window rather than merged; the window that had focus gets it back rather than the last one rebuilt; pinned tabs are never grouped (Chrome forbids it); a build without `chrome.tabGroups` still locks and restores. `commands` adds Cmd/Ctrl+Shift+L, dormant on an unconfigured profile; the idle threshold is reapplied on every worker start |
 | **4. UI + settings** | options page, password setup/change, backoff UI | Can set and change a password without ever seeing it in a `window.prompt` |
 | **4b. Parent escrow** | keypair generation UI, `wrap_master`, "Parent unlock" on the lock screen, managed-storage read | Master password unlocks any profile including mine; the profile's own password still works afterward (no forced reset); escrow is visibly labeled |
 | **5. Hardening** | sender validation audit, storage-tamper review, CSP, error paths, multi-profile test | Every `onMessage` handler checks `sender.id === chrome.runtime.id`; SW crash while locked recovers to a locked state; two profiles with different passwords lock/unlock independently and a dormant third profile stays silent |

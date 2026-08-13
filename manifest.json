@@ -5,7 +5,16 @@
   "description": "Password lock for a Chrome profile. Locking encrypts and closes your tabs; only your password brings them back.",
   "minimum_chrome_version": "120",
   "incognito": "split",
-  "permissions": ["storage", "tabs", "windows", "idle", "alarms"],
+  "permissions": ["storage", "tabs", "tabGroups", "idle", "alarms"],
+  "commands": {
+    "lock-now": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L",
+        "mac": "Command+Shift+L"
+      },
+      "description": "Lock this Chrome profile"
+    }
+  },
   "background": {
     "service_worker": "src/service_worker.js",
     "type": "module"

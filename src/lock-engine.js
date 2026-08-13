@@ -129,8 +129,13 @@ export async function lock(reason = 'manual') {
 
 /**
  * The plaintext snapshot: every normal window and the tabs worth restoring.
- * Geometry, pinning, order and the active tab are captured here; tab *groups*
- * are Phase 3.
+ * Geometry, window state, focus, tab order, pinning, the active tab and tab
+ * groups — everything needed for the restored session to be indistinguishable
+ * from the original.
+ *
+ * Group membership is recorded on each tab as an index into the window's
+ * `groups` array rather than as Chrome's group id, because ids are not stable
+ * across a restore and an index is all the regrouping step needs.
  */
 async function captureSnapshot() {
   const windows = await chrome.windows.getAll({
@@ -145,12 +150,16 @@ async function captureSnapshot() {
     // forgotten (PLAN.md §10.4).
     if (win.incognito) continue;
 
+    const groups = await captureGroups(win.id);
+    const groupIndexById = new Map(groups.map((group, i) => [group.id, i]));
+
     const tabs = (win.tabs ?? [])
       .filter((tab) => isRestorable(tab.url))
       .map((tab) => ({
         url: tab.url,
         pinned: tab.pinned === true,
         active: tab.active === true,
+        group: groupIndexById.get(tab.groupId) ?? null,
       }));
     if (tabs.length === 0) continue;
 
@@ -160,10 +169,34 @@ async function captureSnapshot() {
       width: win.width,
       height: win.height,
       state: win.state,
+      focused: win.focused === true,
+      // Ids are dropped: they do not survive a restore, and tabs reference
+      // groups by index into this array.
+      groups: groups.map(({ id, ...rest }) => rest),
       tabs,
     });
   }
-  return { v: 1, capturedAt: Date.now(), windows: captured };
+  return { v: 2, capturedAt: Date.now(), windows: captured };
+}
+
+/**
+ * Tab groups for one window. `tabGroups` is a separate permission and a separate
+ * API from `tabs`, and it is absent on older Chrome builds — a profile without it
+ * should still lock, just without group fidelity.
+ */
+async function captureGroups(windowId) {
+  if (!chrome.tabGroups) return [];
+  try {
+    const groups = await chrome.tabGroups.query({ windowId });
+    return groups.map((group) => ({
+      id: group.id,
+      title: group.title ?? '',
+      color: group.color,
+      collapsed: group.collapsed === true,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function isRestorable(url) {
@@ -233,8 +266,16 @@ async function restore(snapshot, lockWindowId) {
     await storage.clearLockState();
     await sleep(RESTORE_SETTLE_MS);
 
+    // Focus is applied last: every window is created focused (Chrome focuses a
+    // new window regardless), so without a final pass the last one restored
+    // would always end up on top rather than the one that was.
+    let focusWindowId = null;
     for (const win of snapshot.windows ?? []) {
-      await restoreWindow(win);
+      const createdId = await restoreWindow(win);
+      if (createdId != null && (win.focused || focusWindowId === null)) focusWindowId = createdId;
+    }
+    if (focusWindowId != null) {
+      await chrome.windows.update(focusWindowId, { focused: true }).catch(() => {});
     }
 
     // The snapshot is consumed on restore: the ciphertext and its wraps are the
@@ -247,16 +288,24 @@ async function restore(snapshot, lockWindowId) {
   }
 }
 
+/**
+ * Rebuild one window: geometry, then per-tab state, then groups.
+ *
+ * The order is forced by Chrome. Pinning moves a tab to the front of the strip,
+ * and a pinned tab cannot belong to a group — so pinning must happen before
+ * grouping, or the group call would fail on tabs that have since moved.
+ *
+ * @returns {Promise<number|null>} the new window's id
+ */
 async function restoreWindow(win) {
   const urls = (win.tabs ?? []).map((tab) => tab.url).filter(Boolean);
-  if (urls.length === 0) return;
+  if (urls.length === 0) return null;
 
   // Chrome rejects geometry combined with a non-normal state, so it is one or
   // the other.
-  const geometry =
-    win.state === 'maximized' || win.state === 'fullscreen'
-      ? { state: win.state }
-      : { left: win.left, top: win.top, width: win.width, height: win.height };
+  const geometry = win.state && win.state !== 'normal'
+    ? { state: win.state }
+    : { left: win.left, top: win.top, width: win.width, height: win.height };
 
   const created = await chrome.windows.create({ url: urls, focused: true, ...geometry });
   const tabs = created?.tabs ?? [];
@@ -269,6 +318,45 @@ async function restoreWindow(win) {
     if (source.active) update.active = true;
     if (Object.keys(update).length > 0) {
       await chrome.tabs.update(tabs[i].id, update).catch(() => {});
+    }
+  }
+
+  await restoreGroups(win, created?.id, tabs);
+  return created?.id ?? null;
+}
+
+/**
+ * Recreate the window's tab groups, with their titles, colors and collapsed
+ * state. Best-effort throughout: a window whose groups cannot be rebuilt is
+ * still a restored window, and losing a group label is not worth losing tabs
+ * over.
+ */
+async function restoreGroups(win, windowId, tabs) {
+  if (!chrome.tabGroups || windowId == null) return;
+
+  // group index -> the new tab ids that belonged to it
+  const members = new Map();
+  for (let i = 0; i < tabs.length; i++) {
+    const source = win.tabs[i];
+    // Pinned tabs cannot be grouped; Chrome would have dropped them from the
+    // group on capture anyway, but storage is locally editable so check here.
+    if (!source || source.group == null || source.pinned) continue;
+    if (!members.has(source.group)) members.set(source.group, []);
+    members.get(source.group).push(tabs[i].id);
+  }
+
+  for (const [index, tabIds] of members) {
+    const group = win.groups?.[index];
+    if (!group) continue;
+    try {
+      const groupId = await chrome.tabs.group({ tabIds, createProperties: { windowId } });
+      await chrome.tabGroups.update(groupId, {
+        title: group.title,
+        color: group.color,
+        collapsed: group.collapsed === true,
+      });
+    } catch {
+      // Grouping is cosmetic. The tabs are already open and that is the point.
     }
   }
 }
