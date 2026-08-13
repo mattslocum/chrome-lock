@@ -331,14 +331,10 @@ master password. `wrap_pw` and `wrap_master`, nothing else.
 Not doing: security questions (ChromeLock MD5s the answer), email OTP, or timed
 auto-reset. All three are unauthenticated-bypass shaped.
 
-**Caveat worth verifying in Phase 3 — Chrome Sync cuts both ways here.** Chrome syncs
-open tabs to the Google account (`chrome://history/syncedTabs`, visible from any signed-in
-device). Two consequences: (a) a forgotten master password may not actually be fatal,
-since the tab list might be recoverable from another device, and (b) more importantly,
-our snapshot's confidentiality is only as good as that sync surface. Closing the tabs
-should push an empty tab list for the device, but **confirm what a second signed-in
-device shows while a profile is locked** — if the pre-lock tab list lingers there, the
-encryption is doing less work than it appears to.
+Chrome Sync does expose open tabs to the Google account
+(`chrome://history/syncedTabs`), so the snapshot is not the only copy of a tab list in
+existence. **Explicitly out of scope:** the concern here is a kid on this machine
+opening my profile or a sibling's, not what a signed-in device elsewhere can see.
 
 ---
 
@@ -404,9 +400,9 @@ per-profile and fine. Move to the policy install once the extension is stable.
 2. ~~Master password vs. printed recovery keys?~~ **Resolved:** asymmetric master
    password, escrowed on all profiles including mine, never forcing a password reset,
    and **no recovery key of any kind** (§6). Two unlock paths, that's it.
-6. **Does a second signed-in device still show the pre-lock tab list while a profile is
-   locked?** (§6 caveat) Determines whether Chrome Sync quietly undercuts the snapshot
-   encryption. Verify in Phase 3.
+6. ~~Chrome Sync exposing tabs to other devices?~~ **Resolved: out of scope.** The
+   threat is a kid on this machine opening another profile, not a remote signed-in
+   device.
 3. Idle-lock default: on or off, and what delay? Suggest on at 10 min, matching
    ChromeLock's `idleLockDelay: 600`, but that one defaults it off.
 4. Should incognito windows be captured and restored, or just closed and forgotten?
