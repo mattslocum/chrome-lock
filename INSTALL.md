@@ -126,6 +126,24 @@ sudo chmod 644 "/Library/Managed Preferences/$USER/com.google.Chrome.plist"
 
 Machine-wide instead: drop the `/$USER` from the destination path.
 
+## While you are here: require OS auth for saved passwords
+
+Not part of this extension, and worth doing anyway on the same machine.
+
+Protection mode closes any window or tab created while a profile is locked, so
+`chrome://password-manager` is shut the moment it opens — but that is a removal
+racing a creation, not a gate, and the site list is legible in the interval.
+Chrome has an actual gate for this:
+
+**Settings → Autofill and passwords → Google Password Manager → Settings → *Use
+your screen lock when filling passwords* (and *Require re-authentication to show
+passwords*).**
+
+With one shared macOS login this is the only thing standing between a curious kid
+and a revealed password, whether or not a profile is locked. It closes the glance
+gap that no extension can close, because an extension cannot gate a `chrome://`
+page — it can only close the window after Chrome has already drawn it.
+
 Then quit Chrome completely (⌘Q — closing the windows is not enough) and reopen
 it.
 
