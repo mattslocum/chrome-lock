@@ -1,0 +1,14 @@
+{
+  "name": "chrome-lock",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Password lock for a Chrome profile. No dependencies, no build step.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "bench": "node scripts/bench.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

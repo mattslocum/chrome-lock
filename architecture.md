@@ -82,18 +82,26 @@ per authorized unlock path. That indirection is what lets a master password, and
 password *changes*, exist without ever re-encrypting the snapshot.
 
 ```
-dataKey  = getRandomValues(32)                          per profile, created at setup
-salt     = getRandomValues(16)                          created at setup
-kek      = PBKDF2(password, salt,  600_000, SHA-256)    key-encryption key
-verifier = PBKDF2(password, salt2, 600_000, SHA-256)    fast password pre-check
+dataKey = getRandomValues(32)                          per profile, created at setup
+salt    = getRandomValues(16)                          fresh per wrap
+kek     = PBKDF2(password, salt, 600_000, SHA-256)     key-encryption key
 
-wrap_pw     = AES-GCM(kek, dataKey)
-wrap_master = RSA-OAEP(escrowPublicKey, dataKey)        §7
+wrap_pw     = AES-GCM(kek, dataKey)                    {v, salt, iv, ct, iterations}
+wrap_master = RSA-OAEP(escrowPublicKey, dataKey)       {v, keyId, ct}  — §7
 ```
 
-Two derivations from independent salts, so the stored verifier is never usable as a key.
 WebCrypto exclusively — no crypto-js, no MD5, no unsalted SHA-256, no base64-as-hashing.
 (Respectively: ChromeLock, ChromeLock, BrowserLock, GoogleChromeProfileLock.)
+
+**There is no stored password verifier.** Earlier drafts derived one from a second salt
+as a fast pre-check. It turned out to be redundant *and* costly: AES-GCM is
+authenticated, so a failed unwrap already is the wrong-password signal, while a separate
+verifier would double the PBKDF2 work on every unlock to learn something the unwrap
+tells us anyway. One derivation, one authenticated unwrap.
+
+600,000 iterations measured at **644 ms** per unlock on this machine (`npm run bench`),
+inside the ~1 s budget. That cost is the only thing standing between a copied storage
+file and an offline password grind, so it is tuned to the budget rather than minimized.
 
 ### Snapshot lifecycle
 
@@ -102,7 +110,8 @@ On lock: build the snapshot → `iv = getRandomValues(12)` →
 drop the plaintext and the key reference. **The plaintext snapshot never touches disk.**
 
 On unlock: unwrap `dataKey` via whichever path the user proved → decrypt → restore →
-delete the ciphertext.
+delete the ciphertext. A fresh IV per encryption keeps reuse of one `dataKey` across
+many locks safe.
 
 ### Why disabling the extension cannot restore tabs
 
@@ -159,8 +168,9 @@ Rate-limit check → unwrap `dataKey` → exit protection mode → ~200 ms settl
 windows with geometry, then tabs with url/pinned/index, then regroup tab groups → delete
 ciphertext, clear lock state, close the lock window.
 
-Failed decryption *is* a wrong password; `verifier` exists only for a fast pre-check and
-clear error messaging.
+A failed unwrap *is* a wrong password — `crypto.js` surfaces it as `DecryptError`, and
+the UI must not distinguish "wrong password" from "corrupt record" to the user beyond
+what that error carries.
 
 ### Triggers
 

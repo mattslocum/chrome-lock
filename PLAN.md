@@ -103,18 +103,21 @@ a recovery key, and password *changes* all possible without re-encrypting the sn
 
 ```
 dataKey     = getRandomValues(32 bytes)                 // per-profile, generated at setup
-salt        = getRandomValues(16 bytes)                 // generated once at setup
+salt        = getRandomValues(16 bytes)                 // fresh per wrap
 kek         = PBKDF2(password, salt, 600_000, SHA-256)  → 256-bit AES-GCM key-encryption key
 wrap_pw     = AES-GCM(kek, dataKey)                     // stored
-verifier    = PBKDF2(password, salt2, 600_000, SHA-256) → stored, for a fast password check
 ```
-Two independent derivations from separate salts so the stored verifier can't be used as
-a key. WebCrypto only — `crypto.subtle`. No crypto-js, no MD5, no unsalted SHA-256.
+WebCrypto only — `crypto.subtle`. No crypto-js, no MD5, no unsalted SHA-256.
+
+**Implemented, with one change from this plan:** the stored password *verifier* was
+dropped. AES-GCM is authenticated, so a failed unwrap already signals a wrong password;
+a separate verifier would have doubled PBKDF2 cost per unlock for no information. See
+`architecture.md` §4.
 
 Changing the password rewraps `dataKey` under a new `kek`; the snapshot is untouched.
 
-**Stored on disk:** `salt`, `salt2`, `verifier`, `wrap_pw`, optional `wrap_master` and
-`wrap_recovery` (§6), `iterations`, `version`.
+**Stored on disk:** `wrap_pw` (`salt`, `iv`, `ct`, `iterations`), optional `wrap_master`
+(§6), `version`.
 **Never stored:** the password, the `dataKey` in the clear, the password length.
 
 ### Snapshot encryption
@@ -368,7 +371,7 @@ per-profile and fine. Move to the policy install once the extension is stable.
 
 | Phase | Deliverable | Done when |
 |---|---|---|
-| **1. Crypto core** | `crypto.js` + tests | Envelope encryption round-trips: `dataKey` wrapped/unwrapped under a password; iteration count tuned to <1s; wrong password fails cleanly; password change rewraps without touching the ciphertext |
+| ~~**1. Crypto core**~~ ✅ | `src/crypto.js`, `test/crypto.test.js`, `scripts/bench.js` | **Done.** 23 tests pass; 600k iterations measured at 644 ms; wrong password/master/tampering all raise `DecryptError`; password change rewraps without touching the ciphertext; escrow round-trips and rotation preserves existing wraps |
 | **2. Lock engine** | manifest, SW, lock/unlock, encrypted snapshot | Manual lock closes everything, unlock restores; disabling the extension while locked leaves tabs unrecoverable — **verify this explicitly** |
 | **3. Fidelity + triggers** | geometry, pinned, order, tab groups; startup + idle + keyboard shortcut | Restored session is visually indistinguishable from the original |
 | **4. UI + settings** | options page, password setup/change, backoff UI | Can set and change a password without ever seeing it in a `window.prompt` |
