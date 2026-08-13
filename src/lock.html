@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Locked</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body>
+    <div class="center">
+      <h1>This profile is locked</h1>
+      <p>Enter your password to restore your tabs.</p>
+      <form id="unlock-form">
+        <input
+          type="password"
+          id="password"
+          autocomplete="current-password"
+          placeholder="Password"
+          autofocus
+        />
+        <button type="submit" id="submit">Unlock</button>
+        <div class="message" id="message" role="alert"></div>
+      </form>
+    </div>
+    <script type="module" src="lock.js"></script>
+  </body>
+</html>

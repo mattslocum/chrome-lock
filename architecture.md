@@ -53,14 +53,18 @@ in plaintext on disk while claiming to protect it.
 service_worker.js       orchestration, message router, lifecycle
   ├── lock-engine.js    snapshot / close / restore / protection mode
   ├── crypto.js         PBKDF2, AES-GCM, RSA-OAEP — sole caller of crypto.subtle
-  ├── escrow.js         master-key bundle: read, validate, wrap
-  ├── storage.js        typed accessors over chrome.storage.local
+  ├── storage.js        typed accessors over chrome.storage.local and .managed
   └── settings.js       defaults and validation
 
 lock.html    / lock.js        lock window — password field, parent-unlock option
 popup.html   / popup.js       toolbar — Lock now / Settings, or first-run setup
 options.html / options.js     password setup and change, triggers, escrow status
+ui.css                        shared styling for the extension pages
 ```
+
+There is no separate `escrow.js`: escrow turned out to be the same key-bundle mechanism
+as the profile's own password (§4), so it is `crypto.js` plus one managed-storage read in
+`storage.js`.
 
 Plain ES modules; `"type": "module"` service worker. No framework, no bundler,
 unminified. Target is comfortably under 1000 lines total — the reference point being
@@ -77,27 +81,49 @@ every reference implementation.
 
 ### Envelope encryption
 
-The snapshot is encrypted under a random **data key**; the data key is then wrapped once
-per authorized unlock path. That indirection is what lets a master password, and
-password *changes*, exist without ever re-encrypting the snapshot.
+Each lock generates a fresh **data key**, encrypts the snapshot under it, and wraps that
+data key once per authorized unlock path. That indirection is what lets a master
+password, and password *changes*, exist without ever re-encrypting the snapshot.
+
+Both wraps use the identical mechanism — a **key bundle**: an RSA-OAEP keypair whose
+private half is sealed under a password. The public half is plaintext, and the public
+half is all a lock needs.
 
 ```
-dataKey = getRandomValues(32)                          per profile, created at setup
-salt    = getRandomValues(16)                          fresh per wrap
-kek     = PBKDF2(password, salt, 600_000, SHA-256)     key-encryption key
+                                                       key bundle, created once
+{pub, priv} = RSA-OAEP-3072 / SHA-256
+salt        = getRandomValues(16)
+kek         = PBKDF2(password, salt, 600_000, SHA-256)
+privWrapped = AES-GCM(kek, pkcs8(priv))
+bundle      = {v, keyId, pub, privWrapped, salt, iterations}
 
-wrap_pw     = AES-GCM(kek, dataKey)                    {v, salt, iv, ct, iterations}
-wrap_master = RSA-OAEP(escrowPublicKey, dataKey)       {v, keyId, ct}  — §7
+                                                       per lock
+dataKey     = getRandomValues(32)
+ciphertext  = AES-GCM(dataKey, iv, JSON(snapshot))
+wrap_pw     = RSA-OAEP(profileBundle.pub, dataKey)     {v, keyId, ct}
+wrap_master = RSA-OAEP(escrowBundle.pub,  dataKey)     {v, keyId, ct}  — §7
 ```
+
+**Why asymmetric even for the profile's own password.** An earlier draft wrapped the
+data key symmetrically, under PBKDF2 of the password. That cannot work: locking has to
+*encrypt* the snapshot, and the startup and idle triggers fire with nobody present to
+type anything. A symmetric wrap would force the extension to hold the key while locked —
+destroying the one property this design exists for. §7 had already identified exactly
+this constraint for the parent escrow; it applies to the profile's own password too, and
+the answer is the same. So the two unlock paths are now structurally identical, and one
+tested primitive serves both.
+
+The cost is a single RSA keygen (~1 s) at first-run setup. Unlock cost is unchanged: one
+PBKDF2, then an RSA decrypt that rounds to nothing beside it.
 
 WebCrypto exclusively — no crypto-js, no MD5, no unsalted SHA-256, no base64-as-hashing.
 (Respectively: ChromeLock, ChromeLock, BrowserLock, GoogleChromeProfileLock.)
 
 **There is no stored password verifier.** Earlier drafts derived one from a second salt
-as a fast pre-check. It turned out to be redundant *and* costly: AES-GCM is
-authenticated, so a failed unwrap already is the wrong-password signal, while a separate
-verifier would double the PBKDF2 work on every unlock to learn something the unwrap
-tells us anyway. One derivation, one authenticated unwrap.
+as a fast pre-check. It turned out to be redundant *and* costly: AES-GCM and RSA-OAEP are
+both authenticated, so a failed unwrap already is the wrong-password signal, while a
+separate verifier would double the PBKDF2 work on every unlock to learn something the
+unwrap tells us anyway. One derivation, one authenticated unwrap.
 
 600,000 iterations measured at **644 ms** per unlock on this machine (`npm run bench`),
 inside the ~1 s budget. That cost is the only thing standing between a copied storage
@@ -105,24 +131,30 @@ file and an offline password grind, so it is tuned to the budget rather than min
 
 ### Snapshot lifecycle
 
-On lock: build the snapshot → `iv = getRandomValues(12)` →
-`ciphertext = AES-GCM(dataKey, iv, JSON(snapshot))` → write `{v, iv, ciphertext}` →
-drop the plaintext and the key reference. **The plaintext snapshot never touches disk.**
+On lock: build the snapshot → fresh `dataKey` and `iv` → encrypt → write
+`{v, iv, ciphertext}` plus both wraps → wipe the `dataKey`. **The plaintext snapshot
+never touches disk.**
 
-On unlock: unwrap `dataKey` via whichever path the user proved → decrypt → restore →
-delete the ciphertext. A fresh IV per encryption keeps reuse of one `dataKey` across
-many locks safe.
+On unlock: password → the bundle's private key → `dataKey` → decrypt → restore → delete
+the ciphertext *and both wraps*. The snapshot is consumed on restore: keeping it past an
+unlock would leave a stale session recoverable by an old password.
 
 ### Why disabling the extension cannot restore tabs
 
-`dataKey` exists only in memory, only between unwrapping and use. Every wrap on disk
-requires a secret the extension does not hold. The service worker is terminated and
-restarted freely while locked; it needs no secret to *keep* enforcing the lock, only to
-*end* it. So a disabled extension holds no key and no plaintext — there is nothing to
-restore, and nothing to leak.
+`dataKey` exists only inside a single call — generated, used, wrapped, wiped. Locking
+touches public keys only. Unwrapping requires a password the extension does not store.
+The service worker is terminated and restarted freely while locked; it needs no secret
+to *keep* enforcing the lock, only to *end* it. So a disabled extension holds no key and
+no plaintext — there is nothing to restore, and nothing to leak.
 
-Changing a password rewraps `dataKey` under a new `kek`, leaving the ciphertext and
-`wrap_master` untouched.
+Verified in `test/lock-engine.test.js`: after a lock, no captured URL appears anywhere in
+this profile's storage; a fresh runtime handed nothing but that storage cannot open the
+snapshot, destroys nothing trying, and still yields the full session to the correct
+password.
+
+Changing a password reseals the private key under a new `kek`. The keypair is unchanged,
+so `keyId`, `pub`, and every existing wrap stay valid — the ciphertext and `wrap_master`
+are never touched.
 
 ### Accepted consequences
 
@@ -161,6 +193,12 @@ is terminated after ~30 s idle, so ChromeLock's 2-second `setInterval` silently 
 but incoming events wake the worker, which makes the listener path self-healing.
 `isRestoring` / `isCreatingLockWindow` guards suppress the reaper during legitimate
 transitions.
+
+Protection mode is therefore **persisted state, not listeners attached at lock time**.
+Listeners are registered once at the top level of the service worker, unconditionally,
+because only a top-level registration survives to wake a terminated worker; each handler
+then re-reads the stored lock state to decide whether to act. Entering protection mode is
+just writing `isLocked`.
 
 ### Unlock
 
@@ -227,17 +265,9 @@ the project.
 
 ### Setup, once
 
-```
-{pub, priv} = RSA-OAEP-3072 / SHA-256                   crypto.subtle.generateKey
-mSalt       = getRandomValues(16)
-mKek        = PBKDF2(masterPassword, mSalt, 600_000, SHA-256)
-privWrapped = AES-GCM(mKek, pkcs8(priv))
-
-escrowBundle = {pub, privWrapped, mSalt, iterations, keyId, version}
-```
-
-The bundle carries no plaintext secret — the private key is encrypted under the master
-password — so it is safe to distribute to every profile.
+`escrowBundle = createKeyBundle(masterPassword)` — the same key bundle as §4, made with
+the master password instead of a profile one. The bundle carries no plaintext secret, so
+it is safe to distribute to every profile.
 
 ### Distribution
 
@@ -253,8 +283,9 @@ profile only ever handles the public half.
 
 ### Parent unlock
 
-"Parent unlock" on the lock screen → master password → `mKek` → unwrap `priv` →
-RSA-decrypt `wrap_master` → `dataKey` → decrypt and restore.
+"Parent unlock" on the lock screen → master password → unwrap `priv` → RSA-decrypt
+`wrap_master` → `dataKey` → decrypt and restore. Identical to a normal unlock but for
+which bundle and which wrap it reads.
 
 **It restores and stops.** A master unlock never resets a password: `wrap_pw` is
 untouched and the profile's own password keeps working, because the common case is
@@ -277,7 +308,7 @@ explicitly chosen action available to the profile owner and to a master unlock a
   any forgotten password.
 - **It reveals the profile's open tabs.** Inherent to restoring a session, and the
   honest cost of the feature.
-- Rotating the master password rewraps `privWrapped` and redistributes; `pub` and every
+- Rotating the master password reseals `privWrapped` and redistributes; `pub` and every
   existing `wrap_master` stay valid. `keyId` lets a future keypair coexist with old wraps.
 
 ### No other recovery path

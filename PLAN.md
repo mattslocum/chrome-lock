@@ -102,19 +102,29 @@ once per authorized unlock path. This indirection is what makes a master passwor
 a recovery key, and password *changes* all possible without re-encrypting the snapshot.
 
 ```
-dataKey     = getRandomValues(32 bytes)                 // per-profile, generated at setup
-salt        = getRandomValues(16 bytes)                 // fresh per wrap
-kek         = PBKDF2(password, salt, 600_000, SHA-256)  → 256-bit AES-GCM key-encryption key
-wrap_pw     = AES-GCM(kek, dataKey)                     // stored
+dataKey     = getRandomValues(32 bytes)                 // fresh per lock
+wrap_pw     = RSA-OAEP(profileBundle.pub, dataKey)      // stored
 ```
 WebCrypto only — `crypto.subtle`. No crypto-js, no MD5, no unsalted SHA-256.
 
-**Implemented, with one change from this plan:** the stored password *verifier* was
-dropped. AES-GCM is authenticated, so a failed unwrap already signals a wrong password;
-a separate verifier would have doubled PBKDF2 cost per unlock for no information. See
-`architecture.md` §4.
+**Implemented, with two changes from this plan:**
 
-Changing the password rewraps `dataKey` under a new `kek`; the snapshot is untouched.
+1. The stored password *verifier* was dropped. AES-GCM and RSA-OAEP are both
+   authenticated, so a failed unwrap already signals a wrong password; a verifier would
+   have doubled PBKDF2 cost per unlock for no information.
+2. **`wrap_pw` is asymmetric, not `AES-GCM(kek, dataKey)`.** Found in Phase 2: locking
+   must *encrypt* the snapshot, and the startup and idle triggers fire with no password
+   present. A symmetric wrap would force the extension to hold the key while locked,
+   which is the exact property §3 exists to prevent. §6 had already worked this out for
+   the parent escrow — it applies to the profile's own password identically. The profile
+   now gets its own key bundle (RSA keypair, private half sealed under the password), so
+   both unlock paths are one mechanism. Cost: one ~1 s RSA keygen at setup; unlock cost
+   unchanged.
+
+See `architecture.md` §4.
+
+Changing the password reseals the private key under a new `kek`. The keypair, and so
+every existing wrap and the snapshot, are untouched.
 
 **Stored on disk:** `wrap_pw` (`salt`, `iv`, `ct`, `iterations`), optional `wrap_master`
 (§6), `version`.
@@ -195,10 +205,9 @@ legitimate transitions (both ChromeLock and we need this).
 
 ### Unlock
 1. Rate-limit check (§5). 2. Derive key, decrypt snapshot; failure to decrypt *is* a
-wrong password — no separate verifier comparison needed, though we keep the verifier
-for a fast pre-check and clear error messaging. 3. Exit protection mode, ~200ms settle.
+wrong password — there is no verifier. 3. Exit protection mode, ~200ms settle.
 4. Recreate windows with geometry → tabs with url/pinned/index → regroup tab groups.
-5. Delete the ciphertext, clear lock state, close the lock window.
+5. Delete the ciphertext and both wraps, clear lock state, close the lock window.
 
 ---
 
@@ -219,8 +228,8 @@ timestamp so restarting the browser doesn't reset it. No counter that wipes anyt
 ### One install, N independent locks
 `chrome.storage.local` is **scoped per Chrome profile**. The extension binary is shared
 across every profile on the machine (and force-install in §7 applies to all of them),
-but all state — `salt`, `salt2`, `verifier`, the encrypted snapshot, settings, backoff
-counters — lives in that profile's own store. Consequences:
+but all state — the profile's key bundle, the encrypted snapshot and its wraps, settings,
+backoff counters — lives in that profile's own store. Consequences:
 
 - Every family member sets **their own password**, independently, on first use.
 - No profile can read or decrypt another profile's state using its own password. This
@@ -372,7 +381,7 @@ per-profile and fine. Move to the policy install once the extension is stable.
 | Phase | Deliverable | Done when |
 |---|---|---|
 | ~~**1. Crypto core**~~ ✅ | `src/crypto.js`, `test/crypto.test.js`, `scripts/bench.js` | **Done.** 23 tests pass; 600k iterations measured at 644 ms; wrong password/master/tampering all raise `DecryptError`; password change rewraps without touching the ciphertext; escrow round-trips and rotation preserves existing wraps |
-| **2. Lock engine** | manifest, SW, lock/unlock, encrypted snapshot | Manual lock closes everything, unlock restores; disabling the extension while locked leaves tabs unrecoverable — **verify this explicitly** |
+| ~~**2. Lock engine**~~ ✅ | `manifest.json`, `service_worker.js`, `lock-engine.js`, `storage.js`, `settings.js`, lock + popup pages, `test/lock-engine.test.js` | **Done.** 43 tests pass. Manual lock closes everything and unlock restores; disable-resistance verified explicitly — after a lock, no captured URL appears anywhere in storage, and a fresh runtime given only that storage cannot open the snapshot, destroys nothing trying, and still yields the session to the correct password. Backoff enforced, protection mode self-heals across a simulated worker death. Note: the crypto design changed here — see §3 |
 | **3. Fidelity + triggers** | geometry, pinned, order, tab groups; startup + idle + keyboard shortcut | Restored session is visually indistinguishable from the original |
 | **4. UI + settings** | options page, password setup/change, backoff UI | Can set and change a password without ever seeing it in a `window.prompt` |
 | **4b. Parent escrow** | keypair generation UI, `wrap_master`, "Parent unlock" on the lock screen, managed-storage read | Master password unlocks any profile including mine; the profile's own password still works afterward (no forced reset); escrow is visibly labeled |
@@ -407,8 +416,11 @@ per-profile and fine. Move to the policy install once the extension is stable.
    threat is a kid on this machine opening another profile, not a remote signed-in
    device.
 3. Idle-lock default: on or off, and what delay? Suggest on at 10 min, matching
-   ChromeLock's `idleLockDelay: 600`, but that one defaults it off.
-4. Should incognito windows be captured and restored, or just closed and forgotten?
-   Forgetting is arguably more correct for incognito's semantics.
+   ChromeLock's `idleLockDelay: 600`, but that one defaults it off. **Phase 2 ships it
+   off at 600 s**, pending this decision — trigger and setting both exist.
+4. ~~Should incognito windows be captured and restored?~~ **Resolved: closed and
+   forgotten.** Capturing them into a record that outlives the session contradicts the
+   point of incognito. Implemented in `captureSnapshot`.
 5. Lock on system sleep/wake? `chrome.idle` covers screen lock via the `"locked"`
-   state — probably sufficient, verify on macOS.
+   state — handled, but **unverified on macOS**: the idle trigger has no automated
+   coverage, since `chrome.idle` cannot be driven from a test.

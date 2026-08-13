@@ -7,19 +7,30 @@
  *
  *   npm run bench
  */
-import { PBKDF2_ITERATIONS, generateDataKey, unwrapWithPassword, wrapWithPassword } from '../src/crypto.js';
+import {
+  PBKDF2_ITERATIONS,
+  createKeyBundle,
+  generateDataKey,
+  unwrapWithBundle,
+  wrapToBundle,
+} from '../src/crypto.js';
 
 const BUDGET_MS = 1000;
 const COUNTS = [100_000, 300_000, 600_000, 1_000_000, 2_000_000];
 const REPS = 3;
 
+/**
+ * Times a full unlock: PBKDF2 to open the bundle, then the RSA decrypt of the
+ * data key. PBKDF2 dominates by orders of magnitude, but measuring the whole
+ * path is what the ~1s budget is actually about.
+ */
 async function timeUnwrap(iterations) {
-  const dataKey = generateDataKey();
-  const wrap = await wrapWithPassword('benchmark-password', dataKey, { iterations });
+  const bundle = await createKeyBundle('benchmark-password', { iterations });
+  const wrap = await wrapToBundle(bundle, generateDataKey());
   const samples = [];
   for (let i = 0; i < REPS; i++) {
     const start = performance.now();
-    await unwrapWithPassword('benchmark-password', wrap);
+    await unwrapWithBundle('benchmark-password', bundle, wrap);
     samples.push(performance.now() - start);
   }
   return samples.reduce((a, b) => a + b) / samples.length;

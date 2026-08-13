@@ -1,26 +1,36 @@
-import { test, describe } from 'node:test';
+import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
   DecryptError,
-  createEscrowBundle,
+  changeBundlePassword,
+  createKeyBundle,
   decryptSnapshot,
   encryptSnapshot,
   fromB64,
   generateDataKey,
-  rotateMasterPassword,
   toB64,
-  unwrapWithMaster,
-  unwrapWithPassword,
-  verifyMasterPassword,
-  wrapForMaster,
-  wrapWithPassword,
+  unwrapWithBundle,
+  verifyBundlePassword,
+  wrapToBundle,
 } from '../src/crypto.js';
 
 // Real iteration counts make the suite unbearably slow; correctness is
 // independent of the count. The tuned production value is asserted separately
 // in bench.js.
 const FAST = { iterations: 1000 };
+
+// RSA-3072 keygen costs about a second, so the bundles are made once and shared.
+// Tests that need a *distinct* keypair say so explicitly.
+let profile; // stands in for a profile's own bundle, password 'kid-pw'
+let escrow; // stands in for the parent escrow bundle, password 'master-pw'
+
+before(async () => {
+  [profile, escrow] = await Promise.all([
+    createKeyBundle('kid-pw', FAST),
+    createKeyBundle('master-pw', FAST),
+  ]);
+});
 
 const SNAPSHOT = {
   windows: [
@@ -29,14 +39,13 @@ const SNAPSHOT = {
       top: 25,
       width: 1440,
       height: 900,
-      focused: true,
+      state: 'normal',
       tabs: [
-        { url: 'https://example.com/', pinned: true, index: 0, active: false },
-        { url: 'https://example.org/x?y=1#z', pinned: false, index: 1, active: true },
+        { url: 'https://example.com/', pinned: true, active: false },
+        { url: 'https://example.org/x?y=1#z', pinned: false, active: true },
       ],
     },
   ],
-  groups: [{ id: 7, title: 'work', color: 'blue', tabIndexes: [1] }],
 };
 
 describe('base64 helpers', () => {
@@ -57,53 +66,69 @@ describe('base64 helpers', () => {
   });
 });
 
-describe('password wrapping', () => {
-  test('round-trips the data key', async () => {
+describe('key bundles', () => {
+  test('round-trips a data key wrapped with only the public half', async () => {
     const dataKey = generateDataKey();
-    const wrap = await wrapWithPassword('correct horse', dataKey, FAST);
-    assert.deepEqual(await unwrapWithPassword('correct horse', wrap), dataKey);
+    // Exactly what a lock does: no password in sight, public key only.
+    const wrap = await wrapToBundle({ v: profile.v, keyId: profile.keyId, pub: profile.pub }, dataKey);
+    assert.deepEqual(await unwrapWithBundle('kid-pw', profile, wrap), dataKey);
+  });
+
+  test('carries no plaintext private key', async () => {
+    // A PKCS#8 RSA private key base64-encodes with this prefix; the sealed form
+    // must not, and the bundle must not open without the password.
+    assert.doesNotMatch(profile.privWrapped.ct, /^MII/);
+    assert.equal(await verifyBundlePassword('wrong-pw', profile), false);
+    assert.equal(await verifyBundlePassword('kid-pw', profile), true);
   });
 
   test('rejects a wrong password with DecryptError, not a crash', async () => {
-    const wrap = await wrapWithPassword('right', generateDataKey(), FAST);
-    await assert.rejects(() => unwrapWithPassword('wrong', wrap), DecryptError);
+    const wrap = await wrapToBundle(profile, generateDataKey());
+    await assert.rejects(() => unwrapWithBundle('wrong', profile, wrap), DecryptError);
   });
 
-  test('rejects tampered ciphertext (GCM authentication)', async () => {
-    const wrap = await wrapWithPassword('pw', generateDataKey(), FAST);
+  test('rejects a wrap made for a different keypair', async () => {
+    const wrap = await wrapToBundle(escrow, generateDataKey());
+    await assert.rejects(() => unwrapWithBundle('kid-pw', profile, wrap), DecryptError);
+  });
+
+  test('rejects tampered ciphertext', async () => {
+    const wrap = await wrapToBundle(profile, generateDataKey());
     const ct = fromB64(wrap.ct);
     ct[0] ^= 0xff;
     await assert.rejects(
-      () => unwrapWithPassword('pw', { ...wrap, ct: toB64(ct) }),
+      () => unwrapWithBundle('kid-pw', profile, { ...wrap, ct: toB64(ct) }),
       DecryptError,
     );
   });
 
   test('rejects an unknown record version', async () => {
-    const wrap = await wrapWithPassword('pw', generateDataKey(), FAST);
-    await assert.rejects(() => unwrapWithPassword('pw', { ...wrap, v: 99 }), DecryptError);
+    const wrap = await wrapToBundle(profile, generateDataKey());
+    await assert.rejects(
+      () => unwrapWithBundle('kid-pw', profile, { ...wrap, v: 99 }),
+      DecryptError,
+    );
   });
 
-  test('uses a fresh salt and IV per wrap', async () => {
-    const dataKey = generateDataKey();
-    const a = await wrapWithPassword('same', dataKey, FAST);
-    const b = await wrapWithPassword('same', dataKey, FAST);
-    assert.notEqual(a.salt, b.salt);
-    assert.notEqual(a.iv, b.iv);
-    assert.notEqual(a.ct, b.ct);
+  test('uses a fresh salt and IV per seal', async () => {
+    const resealed = await changeBundlePassword('kid-pw', 'kid-pw', profile, FAST);
+    assert.notEqual(resealed.salt, profile.salt);
+    assert.notEqual(resealed.privWrapped.iv, profile.privWrapped.iv);
   });
 
   test('survives a JSON round-trip through storage', async () => {
     const dataKey = generateDataKey();
-    const wrap = JSON.parse(JSON.stringify(await wrapWithPassword('pw', dataKey, FAST)));
-    assert.deepEqual(await unwrapWithPassword('pw', wrap), dataKey);
+    const wrap = JSON.parse(JSON.stringify(await wrapToBundle(profile, dataKey)));
+    const stored = JSON.parse(JSON.stringify(profile));
+    assert.deepEqual(await unwrapWithBundle('kid-pw', stored, wrap), dataKey);
   });
 
   test('handles unicode and long passwords', async () => {
     const password = '🔐 correct-horse-battery-staple ünïcodé '.repeat(10);
+    const bundle = await changeBundlePassword('kid-pw', password, profile, FAST);
     const dataKey = generateDataKey();
-    const wrap = await wrapWithPassword(password, dataKey, FAST);
-    assert.deepEqual(await unwrapWithPassword(password, wrap), dataKey);
+    const wrap = await wrapToBundle(bundle, dataKey);
+    assert.deepEqual(await unwrapWithBundle(password, bundle, wrap), dataKey);
   });
 });
 
@@ -134,106 +159,77 @@ describe('snapshot encryption', () => {
 });
 
 describe('password change', () => {
-  test('rewraps the data key without touching the ciphertext', async () => {
+  test('keeps the keypair, so existing wraps and the snapshot are untouched', async () => {
     const dataKey = generateDataKey();
     const blob = await encryptSnapshot(dataKey, SNAPSHOT);
     const before = JSON.stringify(blob);
+    const wrap = await wrapToBundle(profile, dataKey);
 
-    // A password change is exactly: unwrap with the old, wrap under the new.
-    const oldWrap = await wrapWithPassword('old-pw', dataKey, FAST);
-    const recovered = await unwrapWithPassword('old-pw', oldWrap);
-    const newWrap = await wrapWithPassword('new-pw', recovered, FAST);
+    const changed = await changeBundlePassword('kid-pw', 'new-pw', profile, FAST);
 
+    assert.equal(changed.keyId, profile.keyId, 'keypair must not change');
+    assert.equal(changed.pub, profile.pub);
     assert.equal(JSON.stringify(blob), before, 'snapshot must not be re-encrypted');
-    assert.deepEqual(await decryptSnapshot(await unwrapWithPassword('new-pw', newWrap), blob), SNAPSHOT);
-    await assert.rejects(() => unwrapWithPassword('old-pw', newWrap), DecryptError);
-  });
-});
 
-describe('parent escrow', () => {
-  test('master password unwraps a data key wrapped with only the public key', async () => {
-    const bundle = await createEscrowBundle('master-pw', FAST);
-    const dataKey = generateDataKey();
-
-    // What a child profile does at lock time — public half only.
-    const wrap = await wrapForMaster({ keyId: bundle.keyId, pub: bundle.pub, v: bundle.v }, dataKey);
-
-    assert.deepEqual(await unwrapWithMaster('master-pw', bundle, wrap), dataKey);
+    const recovered = await unwrapWithBundle('new-pw', changed, wrap);
+    assert.deepEqual(await decryptSnapshot(recovered, blob), SNAPSHOT);
+    await assert.rejects(() => unwrapWithBundle('kid-pw', changed, wrap), DecryptError);
   });
 
-  test('the distributed bundle carries no plaintext private key', async () => {
-    const bundle = await createEscrowBundle('master-pw', FAST);
-    // A PKCS#8 RSA private key begins with this byte sequence; the wrapped form
-    // must not expose it, nor should the bundle be decryptable without the password.
-    assert.doesNotMatch(bundle.privWrapped.ct, /^MII/);
-    assert.equal(await verifyMasterPassword('wrong-pw', bundle), false);
-    assert.equal(await verifyMasterPassword('master-pw', bundle), true);
-  });
-
-  test('rejects a wrong master password', async () => {
-    const bundle = await createEscrowBundle('master-pw', FAST);
-    const wrap = await wrapForMaster(bundle, generateDataKey());
-    await assert.rejects(() => unwrapWithMaster('nope', bundle, wrap), DecryptError);
-  });
-
-  test('rejects a wrap made for a different keypair', async () => {
-    const mine = await createEscrowBundle('pw', FAST);
-    const other = await createEscrowBundle('pw', FAST);
-    const wrap = await wrapForMaster(other, generateDataKey());
-    await assert.rejects(() => unwrapWithMaster('pw', mine, wrap), DecryptError);
-  });
-
-  test('both unlock paths recover the same key independently', async () => {
-    const bundle = await createEscrowBundle('master-pw', FAST);
-    const dataKey = generateDataKey();
-    const blob = await encryptSnapshot(dataKey, SNAPSHOT);
-
-    const pwWrap = await wrapWithPassword('kid-pw', dataKey, FAST);
-    const masterWrap = await wrapForMaster(bundle, dataKey);
-
-    assert.deepEqual(await decryptSnapshot(await unwrapWithPassword('kid-pw', pwWrap), blob), SNAPSHOT);
-    assert.deepEqual(await decryptSnapshot(await unwrapWithMaster('master-pw', bundle, masterWrap), blob), SNAPSHOT);
-  });
-
-  test('a master unlock does not invalidate the profile password', async () => {
-    const bundle = await createEscrowBundle('master-pw', FAST);
-    const dataKey = generateDataKey();
-    const pwWrap = await wrapWithPassword('kid-pw', dataKey, FAST);
-    const masterWrap = await wrapForMaster(bundle, dataKey);
-
-    await unwrapWithMaster('master-pw', bundle, masterWrap);
-    assert.deepEqual(await unwrapWithPassword('kid-pw', pwWrap), dataKey);
-  });
-
-  test('rotating the master password keeps existing wraps valid', async () => {
-    const bundle = await createEscrowBundle('old-master', FAST);
-    const dataKey = generateDataKey();
-    const wrap = await wrapForMaster(bundle, dataKey);
-
-    const rotated = await rotateMasterPassword('old-master', 'new-master', bundle, FAST);
-
-    assert.equal(rotated.keyId, bundle.keyId, 'keypair must not change');
-    assert.equal(rotated.pub, bundle.pub);
-    assert.deepEqual(await unwrapWithMaster('new-master', rotated, wrap), dataKey);
-    await assert.rejects(() => unwrapWithMaster('old-master', rotated, wrap), DecryptError);
-  });
-
-  test('rotation rejects a wrong current password', async () => {
-    const bundle = await createEscrowBundle('right', FAST);
+  test('rejects a wrong current password', async () => {
     await assert.rejects(
-      () => rotateMasterPassword('wrong', 'new', bundle, FAST),
+      () => changeBundlePassword('wrong', 'new', profile, FAST),
       DecryptError,
     );
   });
 });
 
-describe('profile isolation', () => {
-  test("one profile's password cannot unwrap another's key", async () => {
-    const alice = generateDataKey();
-    const aliceWrap = await wrapWithPassword('alice-pw', alice, FAST);
-    const bobWrap = await wrapWithPassword('bob-pw', generateDataKey(), FAST);
+describe('parent escrow', () => {
+  test('both unlock paths recover the same key independently', async () => {
+    const dataKey = generateDataKey();
+    const blob = await encryptSnapshot(dataKey, SNAPSHOT);
 
-    await assert.rejects(() => unwrapWithPassword('bob-pw', aliceWrap), DecryptError);
-    await assert.rejects(() => unwrapWithPassword('alice-pw', bobWrap), DecryptError);
+    // One lock writes both wraps, using only public keys.
+    const pwWrap = await wrapToBundle(profile, dataKey);
+    const masterWrap = await wrapToBundle(escrow, dataKey);
+
+    assert.deepEqual(
+      await decryptSnapshot(await unwrapWithBundle('kid-pw', profile, pwWrap), blob),
+      SNAPSHOT,
+    );
+    assert.deepEqual(
+      await decryptSnapshot(await unwrapWithBundle('master-pw', escrow, masterWrap), blob),
+      SNAPSHOT,
+    );
+  });
+
+  test('a master unlock does not invalidate the profile password', async () => {
+    const dataKey = generateDataKey();
+    const pwWrap = await wrapToBundle(profile, dataKey);
+    const masterWrap = await wrapToBundle(escrow, dataKey);
+
+    await unwrapWithBundle('master-pw', escrow, masterWrap);
+    assert.deepEqual(await unwrapWithBundle('kid-pw', profile, pwWrap), dataKey);
+  });
+
+  test('rotating the master password keeps existing wraps valid', async () => {
+    const dataKey = generateDataKey();
+    const wrap = await wrapToBundle(escrow, dataKey);
+
+    const rotated = await changeBundlePassword('master-pw', 'new-master', escrow, FAST);
+
+    assert.equal(rotated.keyId, escrow.keyId);
+    assert.deepEqual(await unwrapWithBundle('new-master', rotated, wrap), dataKey);
+    await assert.rejects(() => unwrapWithBundle('master-pw', rotated, wrap), DecryptError);
+  });
+});
+
+describe('profile isolation', () => {
+  test("one profile's password cannot open another's bundle", async () => {
+    const other = await createKeyBundle('other-pw', FAST);
+    const wrap = await wrapToBundle(other, generateDataKey());
+
+    await assert.rejects(() => unwrapWithBundle('kid-pw', other, wrap), DecryptError);
+    await assert.rejects(() => unwrapWithBundle('other-pw', profile, wrap), DecryptError);
   });
 });

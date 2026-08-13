@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Chrome Lock</title>
+    <link rel="stylesheet" href="ui.css" />
+    <style>
+      body {
+        width: 260px;
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Dormant: no password has been set on this profile. -->
+    <section id="setup" hidden>
+      <h1>Set up a password</h1>
+      <p>Until you do, this extension does nothing on this profile.</p>
+      <form id="setup-form">
+        <input
+          type="password"
+          id="new-password"
+          autocomplete="new-password"
+          placeholder="Password (8+ characters)"
+        />
+        <input
+          type="password"
+          id="confirm-password"
+          autocomplete="new-password"
+          placeholder="Confirm password"
+        />
+        <button type="submit">Set password</button>
+        <div class="message" id="setup-message" role="alert"></div>
+      </form>
+    </section>
+
+    <!-- Configured: the one action this phase offers. -->
+    <section id="ready" hidden>
+      <h1>Chrome Lock</h1>
+      <p>Locking encrypts your open tabs and closes them.</p>
+      <button id="lock-now">Lock now</button>
+      <div class="message" id="ready-message" role="alert"></div>
+    </section>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

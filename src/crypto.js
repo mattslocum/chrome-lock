@@ -1,15 +1,22 @@
 /**
  * Envelope encryption for Chrome Lock.
  *
- * The tab snapshot is encrypted under a random 32-byte `dataKey`. The dataKey is
- * never stored in the clear; instead it is *wrapped* once per authorized unlock
- * path:
+ * Each lock generates a fresh 32-byte `dataKey`, encrypts the tab snapshot under
+ * it, and then *wraps* that dataKey once per authorized unlock path:
  *
- *   wrap_pw     AES-GCM under a key derived from the profile's own password
- *   wrap_master RSA-OAEP under the parent escrow public key  (see escrow.js usage)
+ *   wrap_pw     RSA-OAEP under this profile's own public key
+ *   wrap_master RSA-OAEP under the parent escrow public key
  *
- * That indirection is what lets a password change, and a parent master unlock,
- * exist without ever re-encrypting the snapshot itself.
+ * Both wraps use the identical mechanism — a **key bundle**: an RSA-OAEP keypair
+ * whose private half is encrypted under a password (PBKDF2 + AES-GCM). The
+ * public half is plaintext and is all a lock needs.
+ *
+ * Why asymmetric even for the profile's own password: locking must encrypt the
+ * snapshot at a moment when no password is present — the startup and idle
+ * triggers fire with nobody typing. Symmetric wrapping would require the
+ * extension to hold the key while locked, which is exactly the property that
+ * makes "disabling the extension must not restore tabs" true. With a keypair,
+ * locking needs only the public half, and no secret is retained.
  *
  * The only module that touches crypto.subtle. Everything here works unchanged in
  * a Chrome service worker and in Node >=20, so it is testable without a browser.
@@ -68,10 +75,9 @@ export function wipe(bytes) {
   if (bytes instanceof Uint8Array) bytes.fill(0);
 }
 
-// --- password-derived key wrapping ------------------------------------------
-
 /**
- * PBKDF2-HMAC-SHA256 over the password, producing the AES-GCM key-encryption key.
+ * PBKDF2-HMAC-SHA256 over the password, producing the AES-GCM key-encryption key
+ * that protects a bundle's private key.
  * @param {string} password
  * @param {Uint8Array} salt
  * @param {number} iterations
@@ -93,65 +99,174 @@ async function deriveKek(password, salt, iterations) {
   );
 }
 
-/** @returns {Uint8Array} a fresh 32-byte data key */
+/** @returns {Uint8Array} a fresh 32-byte data key, for exactly one snapshot */
 export function generateDataKey() {
   return randomBytes(KEY_BYTES);
 }
 
+// --- key bundles ------------------------------------------------------------
+
 /**
- * Wrap a dataKey under a password. The returned record is safe to persist.
+ * Create a key bundle: an RSA-OAEP keypair whose private half is encrypted under
+ * `password`.
  *
- * There is deliberately no separate stored password "verifier": AES-GCM is
- * authenticated, so a failed unwrap *is* the wrong-password signal, at no extra
- * cost. Adding a verifier would double the PBKDF2 work per unlock to tell us
- * something the unwrap already tells us.
+ * Used for both unlock paths. A profile makes one for itself at first-run setup;
+ * the parent makes one for escrow and distributes it via chrome.storage.managed.
+ * Either way the bundle carries **no plaintext secret**, so it is safe to store
+ * in the clear and safe to hand to every profile on the machine.
  *
  * @param {string} password
- * @param {Uint8Array} dataKey
  * @param {{iterations?: number}} [opts]
  */
-export async function wrapWithPassword(password, dataKey, opts = {}) {
+export async function createKeyBundle(password, opts = {}) {
   const iterations = opts.iterations ?? PBKDF2_ITERATIONS;
+  const { publicKey, privateKey } = await crypto.subtle.generateKey(
+    {
+      name: 'RSA-OAEP',
+      modulusLength: RSA_MODULUS_BITS,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['encrypt', 'decrypt'],
+  );
+
+  const spki = new Uint8Array(await crypto.subtle.exportKey('spki', publicKey));
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
+  const bundle = await sealBundle(pkcs8, spki, password, iterations);
+  wipe(pkcs8);
+  return bundle;
+}
+
+/**
+ * Wrap a dataKey to a bundle. Uses only the public half — the caller needs no
+ * password, which is what lets an idle or startup lock encrypt a snapshot with
+ * nobody present.
+ *
+ * @param {{keyId: string, pub: string}} bundle
+ * @param {Uint8Array} dataKey
+ */
+export async function wrapToBundle(bundle, dataKey) {
+  assertVersion(bundle);
+  const pub = await crypto.subtle.importKey(
+    'spki',
+    fromB64(bundle.pub),
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    false,
+    ['encrypt'],
+  );
+  const ct = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pub, dataKey);
+  return { v: FORMAT_VERSION, keyId: bundle.keyId, ct: toB64(new Uint8Array(ct)) };
+}
+
+/**
+ * Unlock path: password -> bundle's private key -> dataKey.
+ *
+ * There is deliberately no stored password *verifier*. RSA-OAEP and AES-GCM are
+ * both authenticated, so a failed unwrap already is the wrong-password signal; a
+ * verifier would double the PBKDF2 work per unlock to learn nothing new.
+ *
+ * @param {string} password
+ * @param {object} bundle
+ * @param {{keyId: string, ct: string}} wrap
+ * @returns {Promise<Uint8Array>}
+ * @throws {DecryptError} on a wrong password, or a wrap made for another keypair
+ */
+export async function unwrapWithBundle(password, bundle, wrap) {
+  assertVersion(bundle);
+  assertVersion(wrap);
+  if (wrap.keyId !== bundle.keyId) {
+    throw new DecryptError('This wrap was made for a different key');
+  }
+  const priv = await unwrapPrivateKey(password, bundle);
+  try {
+    const raw = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, priv, fromB64(wrap.ct));
+    return new Uint8Array(raw);
+  } catch {
+    throw new DecryptError('Wrapped key could not be decrypted');
+  }
+}
+
+/**
+ * Re-encrypt a bundle's private key under a new password. The keypair itself is
+ * unchanged, so `keyId`, `pub`, and every wrap ever made to this bundle stay
+ * valid — changing a password never touches a snapshot, and rotating the master
+ * password never invalidates a profile's escrow wrap.
+ *
+ * @param {string} oldPassword
+ * @param {string} newPassword
+ * @param {object} bundle
+ * @param {{iterations?: number}} [opts]
+ * @throws {DecryptError} if oldPassword is wrong
+ */
+export async function changeBundlePassword(oldPassword, newPassword, bundle, opts = {}) {
+  const iterations = opts.iterations ?? bundle.iterations ?? PBKDF2_ITERATIONS;
+  const priv = await unwrapPrivateKey(oldPassword, bundle);
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', priv));
+  const resealed = await sealBundle(pkcs8, fromB64(bundle.pub), newPassword, iterations);
+  wipe(pkcs8);
+  return { ...bundle, ...resealed };
+}
+
+/** Check a password against a bundle without needing a wrap to decrypt. */
+export async function verifyBundlePassword(password, bundle) {
+  try {
+    await unwrapPrivateKey(password, bundle);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function sealBundle(pkcs8, spki, password, iterations) {
   const salt = randomBytes(SALT_BYTES);
   const iv = randomBytes(IV_BYTES);
   const kek = await deriveKek(password, salt, iterations);
-  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, kek, dataKey);
+  const privWrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, kek, pkcs8);
   return {
     v: FORMAT_VERSION,
+    keyId: await keyIdFor(spki),
+    pub: toB64(spki),
+    privWrapped: { iv: toB64(iv), ct: toB64(new Uint8Array(privWrapped)) },
     salt: toB64(salt),
-    iv: toB64(iv),
-    ct: toB64(new Uint8Array(ct)),
     iterations,
   };
 }
 
-/**
- * Recover the dataKey from a password wrap.
- * @param {string} password
- * @param {ReturnType<typeof wrapWithPassword> extends Promise<infer T> ? T : never} wrap
- * @returns {Promise<Uint8Array>}
- * @throws {DecryptError} on a wrong password or tampered record
- */
-export async function unwrapWithPassword(password, wrap) {
-  assertVersion(wrap);
-  const kek = await deriveKek(password, fromB64(wrap.salt), wrap.iterations);
+async function unwrapPrivateKey(password, bundle) {
+  assertVersion(bundle);
+  const kek = await deriveKek(password, fromB64(bundle.salt), bundle.iterations);
+  let pkcs8;
   try {
-    const raw = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: fromB64(wrap.iv) },
+    pkcs8 = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: fromB64(bundle.privWrapped.iv) },
       kek,
-      fromB64(wrap.ct),
+      fromB64(bundle.privWrapped.ct),
     );
-    return new Uint8Array(raw);
   } catch {
     throw new DecryptError('Incorrect password');
   }
+  // Marked extractable so changeBundlePassword can re-export it. The plaintext
+  // key exists only for the duration of one unlock.
+  return crypto.subtle.importKey(
+    'pkcs8',
+    pkcs8,
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    true,
+    ['decrypt'],
+  );
+}
+
+/** Stable short id for a public key, so a future keypair can coexist with old wraps. */
+async function keyIdFor(spki) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', spki));
+  return [...digest.slice(0, 8)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 // --- snapshot encryption ----------------------------------------------------
 
 /**
- * Encrypt the tab snapshot. A fresh IV per call, so reusing one dataKey across
- * many locks is safe.
+ * Encrypt the tab snapshot under a dataKey.
  * @param {Uint8Array} dataKey
  * @param {unknown} snapshot JSON-serializable
  */
@@ -192,160 +307,6 @@ function importDataKey(dataKey) {
     'encrypt',
     'decrypt',
   ]);
-}
-
-// --- parent escrow (asymmetric) ---------------------------------------------
-
-/**
- * Create the parent escrow bundle.
- *
- * A profile must wrap its dataKey for the parent *at lock time*, when the master
- * password is not present — so this has to be asymmetric. The bundle contains no
- * plaintext secret (the private key is encrypted under the master password) and
- * is therefore safe to distribute to every profile via chrome.storage.managed.
- *
- * @param {string} masterPassword
- * @param {{iterations?: number}} [opts]
- */
-export async function createEscrowBundle(masterPassword, opts = {}) {
-  const iterations = opts.iterations ?? PBKDF2_ITERATIONS;
-  const { publicKey, privateKey } = await crypto.subtle.generateKey(
-    {
-      name: 'RSA-OAEP',
-      modulusLength: RSA_MODULUS_BITS,
-      publicExponent: new Uint8Array([1, 0, 1]),
-      hash: 'SHA-256',
-    },
-    true,
-    ['encrypt', 'decrypt'],
-  );
-
-  const spki = new Uint8Array(await crypto.subtle.exportKey('spki', publicKey));
-  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
-
-  const mSalt = randomBytes(SALT_BYTES);
-  const iv = randomBytes(IV_BYTES);
-  const mKek = await deriveKek(masterPassword, mSalt, iterations);
-  const privWrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, mKek, pkcs8);
-  wipe(pkcs8);
-
-  return {
-    v: FORMAT_VERSION,
-    keyId: await keyIdFor(spki),
-    pub: toB64(spki),
-    privWrapped: { iv: toB64(iv), ct: toB64(new Uint8Array(privWrapped)) },
-    mSalt: toB64(mSalt),
-    iterations,
-  };
-}
-
-/**
- * Wrap a dataKey for the parent. Uses only the public half — the profile doing
- * this never sees the master password or the private key.
- * @param {{keyId: string, pub: string}} bundle
- * @param {Uint8Array} dataKey
- */
-export async function wrapForMaster(bundle, dataKey) {
-  assertVersion(bundle);
-  const pub = await crypto.subtle.importKey(
-    'spki',
-    fromB64(bundle.pub),
-    { name: 'RSA-OAEP', hash: 'SHA-256' },
-    false,
-    ['encrypt'],
-  );
-  const ct = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pub, dataKey);
-  return { v: FORMAT_VERSION, keyId: bundle.keyId, ct: toB64(new Uint8Array(ct)) };
-}
-
-/**
- * Parent unlock: master password -> private key -> dataKey.
- * @param {string} masterPassword
- * @param {object} bundle
- * @param {{keyId: string, ct: string}} wrap
- * @returns {Promise<Uint8Array>}
- * @throws {DecryptError} on a wrong master password, or a wrap from another keypair
- */
-export async function unwrapWithMaster(masterPassword, bundle, wrap) {
-  assertVersion(bundle);
-  assertVersion(wrap);
-  if (wrap.keyId !== bundle.keyId) {
-    throw new DecryptError('Escrow wrap was made for a different master key');
-  }
-  const priv = await unwrapPrivateKey(masterPassword, bundle);
-  try {
-    const raw = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, priv, fromB64(wrap.ct));
-    return new Uint8Array(raw);
-  } catch {
-    throw new DecryptError('Escrow wrap could not be decrypted');
-  }
-}
-
-/**
- * Re-encrypt the escrow private key under a new master password. The keypair is
- * unchanged, so `keyId`, `pub`, and every existing wrap_master stay valid — no
- * profile needs to re-wrap anything.
- * @param {string} oldPassword
- * @param {string} newPassword
- * @param {object} bundle
- * @param {{iterations?: number}} [opts]
- */
-export async function rotateMasterPassword(oldPassword, newPassword, bundle, opts = {}) {
-  const iterations = opts.iterations ?? bundle.iterations ?? PBKDF2_ITERATIONS;
-  const priv = await unwrapPrivateKey(oldPassword, bundle);
-  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', priv));
-
-  const mSalt = randomBytes(SALT_BYTES);
-  const iv = randomBytes(IV_BYTES);
-  const mKek = await deriveKek(newPassword, mSalt, iterations);
-  const privWrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, mKek, pkcs8);
-  wipe(pkcs8);
-
-  return {
-    ...bundle,
-    privWrapped: { iv: toB64(iv), ct: toB64(new Uint8Array(privWrapped)) },
-    mSalt: toB64(mSalt),
-    iterations,
-  };
-}
-
-/** Cheap check that a master password is correct, without needing a wrap. */
-export async function verifyMasterPassword(masterPassword, bundle) {
-  try {
-    await unwrapPrivateKey(masterPassword, bundle);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function unwrapPrivateKey(masterPassword, bundle) {
-  const mKek = await deriveKek(masterPassword, fromB64(bundle.mSalt), bundle.iterations);
-  let pkcs8;
-  try {
-    pkcs8 = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: fromB64(bundle.privWrapped.iv) },
-      mKek,
-      fromB64(bundle.privWrapped.ct),
-    );
-  } catch {
-    throw new DecryptError('Incorrect master password');
-  }
-  // Marked extractable so rotateMasterPassword can re-export it. The plaintext
-  // key exists only for the duration of an unlock.
-  return crypto.subtle.importKey(
-    'pkcs8',
-    pkcs8,
-    { name: 'RSA-OAEP', hash: 'SHA-256' },
-    true,
-    ['decrypt'],
-  );
-}
-
-/** Stable short id for a public key, so a future keypair can coexist with old wraps. */
-async function keyIdFor(spki) {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', spki));
-  return [...digest.slice(0, 8)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function assertVersion(record) {
